@@ -203,7 +203,7 @@
             el('select', { id: 'f-gfx', 'aria-describedby': 'f-gfx-h', onchange: function (ev) {
               R.store.set({ settings: { graphicsQuality: ev.target.value } });
               ctx.toast('Calidad gráfica: ' + ev.target.options[ev.target.selectedIndex].text + '.', 'ok');
-            } }, [['auto', 'Automática'], ['alta', 'Alta'], ['media', 'Media'], ['baja', 'Baja']].map(function (o) {
+            } }, [['auto', 'Automática'], ['alta', 'Alta (equipos potentes)'], ['media', 'Media'], ['baja', 'Baja']].map(function (o) {
               return el('option', { value: o[0], selected: (settings.graphicsQuality || 'auto') === o[0] }, o[1]);
             })),
             el('div', { 'class': 'hint', id: 'f-gfx-h' }, 'Paisaje 3D: árboles, pasto con viento y sombras. Automática usa Media en el celular y Alta en el computador, y baja sola si la escena va lenta.')

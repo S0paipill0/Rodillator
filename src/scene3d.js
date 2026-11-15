@@ -355,9 +355,9 @@
 
   /* ---- calidad grafica ---- */
   var QUALITY_PRESETS = {
-    alta:  { shadows: true,  shadowSize: 2048, shadowSoft: true,  shadowRange: 110, density: 1,    vegBand: 600, treeR: 1800, nearTreeR: 250, shrubR: 650, nearShrubR: 140, grassR: 150, pixelRatioMax: 2,   hiSpacing: 5,  hiR: 1400 },
-    media: { shadows: true,  shadowSize: 1024, shadowSoft: false, shadowRange: 55,  density: 0.5,  vegBand: 350, treeR: 1000, nearTreeR: 150, shrubR: 420, nearShrubR: 90,  grassR: 80,  pixelRatioMax: 1.5, hiSpacing: 8,  hiR: 1000 },
-    baja:  { shadows: false, shadowSize: 0,    shadowSoft: false, shadowRange: 0,   density: 0.25, vegBand: 200, treeR: 800,  nearTreeR: 120, shrubR: 260, nearShrubR: 50,  grassR: 0,   pixelRatioMax: 1,   hiSpacing: 12, hiR: 700 }
+    alta:  { shadows: true,  shadowSize: 2048, shadowRange: 110, density: 1,    vegBand: 600, treeR: 1800, nearTreeR: 250, shrubR: 650, nearShrubR: 140, grassR: 150, pixelRatioMax: 2,   hiSpacing: 5,  hiR: 1400 },
+    media: { shadows: true,  shadowSize: 1024, shadowRange: 55,  density: 0.5,  vegBand: 350, treeR: 1000, nearTreeR: 100, shrubR: 420, nearShrubR: 90,  grassR: 80,  pixelRatioMax: 1.5, hiSpacing: 8,  hiR: 1000 },
+    baja:  { shadows: false, shadowSize: 0,    shadowRange: 0,   density: 0.25, vegBand: 200, treeR: 800,  nearTreeR: 120, shrubR: 260, nearShrubR: 50,  grassR: 0,   pixelRatioMax: 1,   hiSpacing: 12, hiR: 700 }
   };
 
   /** 'auto' -> 'media' en movil (pointer: coarse o ancho < 900) y 'alta' en escritorio. */
@@ -393,23 +393,23 @@
   /* ---- vegetacion ---- */
   // prob por clase [roca, suelo, pasto, matorral, arbol, agua, nieve, urbano] para una celda de `spacing` m
   var VEG_LAYERS = {
-    tree:  { spacing: 9,   prob: [0, 0.025, 0.05, 0.07, 0.8, 0, 0, 0.14] },
-    shrub: { spacing: 5,   prob: [0, 0.07, 0.06, 0.55, 0.14, 0, 0, 0.04] },
-    grass: { spacing: 1.6, prob: [0, 0.18, 0.85, 0.4, 0.25, 0, 0, 0.06] }
+    tree:  { spacing: 9,   minRoad: 9, prob: [0, 0.025, 0.05, 0.07, 0.8, 0, 0, 0.14] },
+    shrub: { spacing: 5,   minRoad: 6, prob: [0, 0.07, 0.06, 0.55, 0.14, 0, 0, 0.04] },
+    grass: { spacing: 1.6, minRoad: 6, prob: [0, 0.18, 0.85, 0.4, 0.25, 0, 0, 0.06] }
   };
-  var VEG_MIN_ROAD = 6;   // m: nada a menos de esto del eje del camino
+  var VEG_MIN_ROAD = 6;   // m: minimo general al eje del camino (arboles: 9 m, ver VEG_LAYERS)
 
   /**
    * Instancias deterministas de una capa en el rectangulo [x0,x1) x [z0,z1) de mundo.
    * Malla global anclada en (0,0) con jitter por celda: el resultado no depende de como se trocee el mundo.
-   * opts: { seed, density (0..1, por calidad), classAt(x,z), roadDist(x,z), minRoad }
+   * opts: { seed, density (0..1, por calidad), classAt(x,z), roadDist(x,z), minRoad (por defecto el de la capa), annotate(item) opcional }
    * -> [{ x, z, cls, r0, r1, r2, r3 }] (r* en [0,1) para escala, giro, tono y especie)
    */
   function placeVegetation(rect, layerName, opts) {
     var L = VEG_LAYERS[layerName], s = L.spacing, out = [];
     var seed = (opts.seed | 0) + (layerName === 'tree' ? 101 : layerName === 'shrub' ? 202 : 303);
     var dens = opts.density == null ? 1 : opts.density;
-    var minRoad = opts.minRoad == null ? VEG_MIN_ROAD : opts.minRoad;
+    var minRoad = opts.minRoad == null ? L.minRoad : opts.minRoad;
     var i0 = Math.floor(rect.x0 / s) - 1, i1 = Math.ceil(rect.x1 / s), j0 = Math.floor(rect.z0 / s) - 1, j1 = Math.ceil(rect.z1 / s);
     for (var j = j0; j <= j1; j++) {
       for (var i = i0; i <= i1; i++) {
@@ -421,6 +421,7 @@
         if (p <= 0 || hash2(i, j, seed + 3) >= p) continue;
         if (opts.roadDist && opts.roadDist(px, pz) < minRoad) continue;
         out.push({ x: px, z: pz, cls: cls, r0: hash2(i, j, seed + 4), r1: hash2(i, j, seed + 5), r2: hash2(i, j, seed + 6), r3: hash2(i, j, seed + 7) });
+        if (opts.annotate) opts.annotate(out[out.length - 1]);      // justo tras roadDist: puede reutilizar esa consulta
       }
     }
     return out;
@@ -693,9 +694,9 @@
     '  vec3 col = pow(texColor, vec3(1.0 / (1.2 + (1.2 * vSunfade))));',
     '  float lum = dot(col, vec3(0.2126, 0.7152, 0.0722));',
     '  col = max(vec3(0.0), vec3(lum) + (col - vec3(lum)) * uSat) * uScale;',
+    '  vec2 cuv = direction.xz / (max(direction.y, 0.0) + 0.1) * 0.22 + vec2(uTime * 0.0021, uTime * 0.0008);',
+    '  float n = texture2D(uClouds, cuv).r * 0.62 + texture2D(uClouds, cuv * 2.9 + vec2(0.31, 0.17)).r * 0.38;',   // fuera del if: derivadas validas
     '  if (direction.y > 0.0) {',
-    '    vec2 cuv = direction.xz / (direction.y + 0.1) * 0.22 + vec2(uTime * 0.0021, uTime * 0.0008);',
-    '    float n = texture2D(uClouds, cuv).r * 0.62 + texture2D(uClouds, cuv * 2.9 + vec2(0.31, 0.17)).r * 0.38;',
     '    float cov = smoothstep(uCover, uCover + 0.22, n) * smoothstep(0.02, 0.2, direction.y);',
     '    float lit = 0.78 + 0.32 * smoothstep(uCover, uCover + 0.5, n) + 0.35 * pow(max(cosTheta, 0.0), 6.0);',
     '    vec3 cloud = vec3(1.0, 0.99, 0.97) * 1.55 * uScale * lit;',
@@ -942,7 +943,8 @@
 
     // mapa de entorno (reflejos del cielo en agua, barreras metalicas, cuadros)
     var envTex = null;
-    try {
+    // el entorno PMREM es half float: requiere WebGL2 o EXT_color_buffer_half_float (si no, sin reflejos del cielo)
+    if (renderer.capabilities.isWebGL2 || renderer.extensions.has('EXT_color_buffer_half_float')) try {
       var skyScene = new T.Scene(), skyClone = new T.Mesh(skyGeo, skyMat);
       skyClone.scale.setScalar(5000); skyClone.frustumCulled = false; skyScene.add(skyClone);
       var pm = new T.PMREMGenerator(renderer);
@@ -1826,10 +1828,12 @@
       p.mesh.instanceMatrix.needsUpdate = true;
       p.mesh.instanceColor.needsUpdate = true;
     }
-    var nearPools = SPECIES.map(function (sp) { return makePool(vegGeo[sp + 'N'], vegMats[sp], vegDepth[sp], true); });
+    // tres niveles por especie: muy cerca (proyecta sombra), cerca (detalle, sin sombra) y lejos (LOD simple)
+    var shadowPools = SPECIES.map(function (sp) { return makePool(vegGeo[sp + 'N'], vegMats[sp], vegDepth[sp], true); });
+    var nearPools = SPECIES.map(function (sp) { return makePool(vegGeo[sp + 'N'], vegMats[sp], null, false); });
     var farPools = SPECIES.map(function (sp) { return makePool(vegGeo[sp + 'F'], vegMats[sp], null, false); });
     var grassPool = makePool(vegGeo.grass, grassMat, null, false);
-    var allPools = nearPools.concat(farPools, [grassPool]);
+    var allPools = shadowPools.concat(nearPools, farPools, [grassPool]);
 
     // celdas (chunks) de 200 m a lo largo del camino; distancia al camino en anillos de celdas
     var VC = 200, GC = 32;
@@ -1852,130 +1856,188 @@
         }
       }
     })();
-    var _rq2 = { d: 0, sd: 0, y: 0, k: 0, yb: 0 };
-    function roadDist(x, z) { return roadQuery(roadIdx, x, z, 8, 0.1, _rq2).d; }
-    function vegOpts() { return { seed: seed, density: Q.density, classAt: classAt, roadDist: roadDist, minRoad: VEG_MIN_ROAD }; }
-    function genVegChunk(cx, cz) {
-      var rect = { x0: Math.max(grid.x0, cx * VC), x1: Math.min(grid.x1, (cx + 1) * VC), z0: Math.max(grid.z0, cz * VC), z1: Math.min(grid.z1, (cz + 1) * VC) };
-      if (rect.x1 <= rect.x0 || rect.z1 <= rect.z0) return { n: 0, data: new Float32Array(0) };
-      var o = vegOpts(), trees = placeVegetation(rect, 'tree', o), shrubs = placeVegetation(rect, 'shrub', o);
-      var all = trees.concat(shrubs), data = new Float32Array(all.length * 10), n = 0;
-      for (var k = 0; k < all.length; k++) {
-        var it = all[k], isTree = k < trees.length, y = surfaceHeight(it.x, it.z), ele = y / grid.vs + grid.base, sp, s, wf, tint;
-        if (isTree) {
-          var pPop = it.cls === LC.URBANO ? 0.7 : (it.cls === LC.PASTO && ele < 1100 ? 0.45 : 0.06);
-          var pCon = (isChile ? 0.08 : 0.8) * clamp((ele - 700) / 900, 0, 1);
-          var rc = (it.r2 * 7.31) % 1;
-          sp = it.r3 < pPop ? 2 : (rc < pCon ? 1 : 0);
-          s = sp === 2 ? 14 + it.r0 * 9 : (sp === 1 ? 9 + it.r0 * 10 : 5.5 + it.r0 * 6);
-          wf = sp === 2 ? 0.85 + it.r1 * 0.3 : 0.85 + it.r2 * 0.35;
-        } else { sp = 3; s = 0.8 + it.r0 * it.r0 * 1.9; wf = 0.9 + it.r1 * 0.6; }
-        var kk = 0.78 + 0.44 * it.r2, hue = (it.r0 - 0.5) * 0.25;
-        tint = [kk * (1 + hue), kk, kk * (1 - hue * 0.6)];
-        var o2 = n * 10;
-        data[o2] = it.x; data[o2 + 1] = y - (sp === 3 ? 0.15 : 0.35); data[o2 + 2] = it.z; data[o2 + 3] = s; data[o2 + 4] = wf;
-        data[o2 + 5] = it.r1 * Math.PI * 2; data[o2 + 6] = tint[0]; data[o2 + 7] = tint[1]; data[o2 + 8] = tint[2]; data[o2 + 9] = sp;
-        n++;
-      }
-      return { n: n, data: data };
+    function ringAt(x, z) {
+      var ia = Math.floor(x / VC) - vcx0, ib = Math.floor(z / VC) - vcz0;
+      return (ia < 0 || ib < 0 || ia >= vNX || ib >= vNZ) ? 255 : vRing[ib * vNX + ia];
     }
-    function genGrassChunk(cx, cz) {
-      var rect = { x0: Math.max(grid.x0, cx * GC), x1: Math.min(grid.x1, (cx + 1) * GC), z0: Math.max(grid.z0, cz * GC), z1: Math.min(grid.z1, (cz + 1) * GC) };
-      if (rect.x1 <= rect.x0 || rect.z1 <= rect.z0) return { n: 0, data: new Float32Array(0) };
-      var o = vegOpts(); o.minRoad = BERM_OUT + 0.6;
-      var g = placeVegetation(rect, 'grass', o), data = new Float32Array(g.length * 8);
-      for (var k = 0; k < g.length; k++) {
-        var it = g[k], dry = it.cls === LC.PASTO ? 0.15 : 0.75, kk = 0.75 + 0.5 * it.r2;
-        var o2 = k * 8;
-        data[o2] = it.x; data[o2 + 1] = surfaceHeight(it.x, it.z) - 0.05; data[o2 + 2] = it.z; data[o2 + 3] = 0.28 + it.r0 * 0.42;
-        data[o2 + 4] = it.r1 * Math.PI * 2;
-        data[o2 + 5] = kk * (1 + 0.25 * dry); data[o2 + 6] = kk * (1 + 0.05 * dry); data[o2 + 7] = kk * (1 - 0.3 * dry);
-      }
-      return { n: g.length, data: data };
+
+    // una sola consulta del camino por instancia: la distancia (exclusion) y la altura (aplanado) salen de la misma
+    var _rqv = { d: 0, sd: 0, y: 0, k: 0, yb: 0 }, rqX = NaN, rqZ = NaN;
+    function vegRoadDist(x, z) { roadQuery(roadIdx, x, z, roadInfl, plateau, _rqv); rqX = x; rqZ = z; return _rqv.d; }
+    function vegHeight(x, z, nearRoad) {
+      var th = triHeight(x, z);
+      if (!nearRoad) return th;                                      // chunk lejos del camino: sin aplanado
+      if (x !== rqX || z !== rqZ) vegRoadDist(x, z);
+      return _rqv.k > 0 ? th + _rqv.k * (_rqv.yb - ROAD_SINK - th) : th;
     }
-    var vegChunks = new Map(), grassChunks = new Map(), vegQueue = [], grassQueue = [];
-    var vegLast = { x: 1e12, z: 1e12, rx: 1e12, rz: 1e12 }, grassLast = { x: 1e12, z: 1e12, rx: 1e12, rz: 1e12 }, vegDirty = false, grassDirty = false;
+    var optNear = { seed: seed, density: 1, classAt: classAt, roadDist: vegRoadDist, annotate: function (it) { it.y = vegHeight(it.x, it.z, true); } };
+    var optFar = { seed: seed, density: 1, classAt: classAt, roadDist: null, annotate: function (it) { it.y = triHeight(it.x, it.z); } };
+
+    var KOFF = 32768, K32 = 4294967296;
+    function ckey(a, b) { return (a + KOFF) * 65536 + (b + KOFF); }
+    function ckA(k) { return Math.floor(k / 65536) - KOFF; }
+    function ckB(k) { return (k % 65536) - KOFF; }
+    function numDesc(p, q) { return q - p; }
+
+    // capa de chunks con cola por distancia y generacion reanudable (por franjas de filas, con control de tiempo)
+    function ChunkLayer(size, layers, stride) {
+      this.size = size; this.layers = layers; this.stride = stride;
+      this.map = new Map(); this.queue = []; this.job = null; this.gen = 0;
+      this.lx = 1e12; this.lz = 1e12; this.rx = 1e12; this.rz = 1e12; this.dirty = false; this.lastRebuild = -1e9;
+    }
+    var vegLayer = new ChunkLayer(VC, ['tree', 'shrub'], 10), grassLayer = new ChunkLayer(GC, ['grass'], 8);
+    var _cl = null, _ccx = 0, _ccz = 0, _cfar2 = 0;
+    function dropFar(ch, key) {
+      var ex = (ckA(key) + 0.5) * _cl.size - _ccx, ez = (ckB(key) + 0.5) * _cl.size - _ccz;
+      if (ex * ex + ez * ez > _cfar2) { _cl.map.delete(key); _cl.dirty = true; }
+    }
+    function enqueue(L, cx, cz, R, ringMax) {
+      var S = L.size, a0 = Math.floor((cx - R) / S), a1 = Math.floor((cx + R) / S), b0 = Math.floor((cz - R) / S), b1 = Math.floor((cz + R) / S);
+      L.queue.length = 0;
+      for (var b = b0; b <= b1; b++) {
+        for (var a = a0; a <= a1; a++) {
+          var mx = (a + 0.5) * S, mz = (b + 0.5) * S;
+          if (mx < grid.x0 - S || mx > grid.x1 + S || mz < grid.z0 - S || mz > grid.z1 + S) continue;
+          if (ringMax != null && ringAt(mx, mz) > ringMax) continue;
+          var dx = mx - cx, dz = mz - cz, d2 = dx * dx + dz * dz;
+          if (d2 >= R * R) continue;
+          var key = ckey(a, b), ch = L.map.get(key);
+          if (ch && ch.gen === L.gen) continue;
+          if (L.job && L.job.key === key) continue;
+          var pri = Math.min(8191, Math.sqrt(d2)) + (ch ? 8192 : 0);        // primero los que faltan; luego los obsoletos
+          L.queue.push(Math.floor(pri) * K32 + key);
+        }
+      }
+      L.queue.sort(numDesc);                                             // el mas cercano al final (pop)
+      _cl = L; _ccx = cx; _ccz = cz; _cfar2 = (R + S) * (R + S);
+      L.map.forEach(dropFar);
+    }
+    function startJob(L, key) {
+      var S = L.size, a = ckA(key), b = ckB(key);
+      var rect = { x0: Math.max(grid.x0, a * S), x1: Math.min(grid.x1, (a + 1) * S), z0: Math.max(grid.z0, b * S), z1: Math.min(grid.z1, (b + 1) * S) };
+      var near = ringAt((a + 0.5) * S, (b + 0.5) * S) <= 1;
+      return { key: key, rect: rect, near: near, li: 0, z: rect.z0, items: [], layerOf: [], k: 0, n: 0, data: null, gen: L.gen };
+    }
+    // avanza el trabajo hasta `deadline`; true = terminado
+    function stepJob(L, job, deadline) {
+      var r = job.rect, o = job.near ? optNear : optFar, it, k;
+      if (r.x1 <= r.x0 || r.z1 <= r.z0) { job.data = new Float32Array(0); return true; }
+      o.density = Q.density;
+      while (job.li < L.layers.length) {
+        var ln = L.layers[job.li], strip = VEG_LAYERS[ln].spacing * 6;
+        while (job.z < r.z1) {
+          var z1 = Math.min(r.z1, job.z + strip);
+          var got = placeVegetation({ x0: r.x0, x1: r.x1, z0: job.z, z1: z1 }, ln, o);
+          for (k = 0; k < got.length; k++) { job.items.push(got[k]); job.layerOf.push(job.li); }
+          job.z = z1;
+          if (now() > deadline) return false;
+        }
+        job.li++; job.z = r.z0;
+      }
+      if (!job.data) job.data = new Float32Array(job.items.length * L.stride);
+      var grass = L === grassLayer;
+      while (job.k < job.items.length) {
+        it = job.items[job.k];
+        var y = it.y, d = job.data, o2 = job.n * L.stride;
+        if (grass) {
+          var dry = it.cls === LC.PASTO ? 0.15 : 0.75, kg = 0.75 + 0.5 * it.r2;
+          d[o2] = it.x; d[o2 + 1] = y - 0.05; d[o2 + 2] = it.z; d[o2 + 3] = 0.28 + it.r0 * 0.42; d[o2 + 4] = it.r1 * Math.PI * 2;
+          d[o2 + 5] = kg * (1 + 0.25 * dry); d[o2 + 6] = kg * (1 + 0.05 * dry); d[o2 + 7] = kg * (1 - 0.3 * dry);
+        } else {
+          var isTree = job.layerOf[job.k] === 0, ele = y / grid.vs + grid.base, sp, s, wf;
+          if (isTree) {
+            var pPop = it.cls === LC.URBANO ? 0.7 : (it.cls === LC.PASTO && ele < 1100 ? 0.45 : 0.06);
+            var pCon = (isChile ? 0.08 : 0.8) * clamp((ele - 700) / 900, 0, 1);
+            sp = it.r3 < pPop ? 2 : ((it.r2 * 7.31) % 1 < pCon ? 1 : 0);
+            s = sp === 2 ? 14 + it.r0 * 9 : (sp === 1 ? 9 + it.r0 * 10 : 5.5 + it.r0 * 6);
+            wf = sp === 2 ? 0.85 + it.r1 * 0.3 : 0.85 + it.r2 * 0.35;
+          } else { sp = 3; s = 0.8 + it.r0 * it.r0 * 1.9; wf = 0.9 + it.r1 * 0.6; }
+          var kk = 0.78 + 0.44 * it.r2, hue = (it.r0 - 0.5) * 0.25;
+          d[o2] = it.x; d[o2 + 1] = y - (sp === 3 ? 0.15 : 0.35); d[o2 + 2] = it.z; d[o2 + 3] = s; d[o2 + 4] = wf;
+          d[o2 + 5] = it.r1 * Math.PI * 2; d[o2 + 6] = kk * (1 + hue); d[o2 + 7] = kk; d[o2 + 8] = kk * (1 - hue * 0.6); d[o2 + 9] = sp;
+        }
+        job.n++; job.k++;
+        if ((job.k & 63) === 0 && now() > deadline) return false;
+      }
+      return true;
+    }
+    function pumpLayer(L, deadline) {
+      while (now() < deadline) {
+        if (!L.job) {
+          if (!L.queue.length) return;
+          var v = L.queue.pop();
+          L.job = startJob(L, v - Math.floor(v / K32) * K32);
+        }
+        if (!stepJob(L, L.job, deadline)) return;
+        var j = L.job;
+        L.job = null;
+        if (j.gen === L.gen) { L.map.set(j.key, { n: j.n, data: j.data, gen: j.gen }); L.dirty = true; }
+      }
+    }
     function clearVegetation() {
-      vegChunks.clear(); grassChunks.clear(); vegQueue.length = 0; grassQueue.length = 0;
-      vegLast.x = grassLast.x = 1e12; vegDirty = grassDirty = true;
+      [vegLayer, grassLayer].forEach(function (L) { L.map.clear(); L.queue.length = 0; L.job = null; L.lx = 1e12; L.dirty = true; });
     }
-    function vegRingMax() { return Math.floor((Q.vegBand + VC / 2) / VC); }
-    function updateVegetation(cx, cz, budgetMs) {
-      var t0 = now(), key, k, dx, dz;
-      var R = Q.treeR + VC * 0.71, ringMax = vegRingMax();
-      if ((cx - vegLast.x) * (cx - vegLast.x) + (cz - vegLast.z) * (cz - vegLast.z) > 625) {
-        vegLast.x = cx; vegLast.z = cz; vegQueue.length = 0;
-        var a0 = Math.floor((cx - R) / VC), a1 = Math.floor((cx + R) / VC), b0 = Math.floor((cz - R) / VC), b1 = Math.floor((cz + R) / VC);
-        for (var b = b0; b <= b1; b++) {
-          for (var a = a0; a <= a1; a++) {
-            var ia = a - vcx0, ib = b - vcz0;
-            if (ia < 0 || ib < 0 || ia >= vNX || ib >= vNZ || vRing[ib * vNX + ia] > ringMax) continue;
-            key = a + ',' + b;
-            dx = (a + 0.5) * VC - cx; dz = (b + 0.5) * VC - cz;
-            if (dx * dx + dz * dz < R * R && !vegChunks.has(key)) vegQueue.push([dx * dx + dz * dz, a, b, key]);
-          }
-        }
-        vegQueue.sort(function (p, q) { return q[0] - p[0]; });
-        var far2 = (R + VC) * (R + VC);
-        vegChunks.forEach(function (ch, kk) { var p = kk.split(','); var ex = (+p[0] + 0.5) * VC - cx, ez = (+p[1] + 0.5) * VC - cz; if (ex * ex + ez * ez > far2) { vegChunks.delete(kk); vegDirty = true; } });
+    // cambio de calidad: los chunks quedan obsoletos y se regeneran de a poco (se siguen viendo los actuales)
+    function staleVegetation() {
+      [vegLayer, grassLayer].forEach(function (L) { L.gen++; L.job = null; L.lx = 1e12; L.dirty = true; });
+    }
+    var _px = 0, _pz = 0, _r = {};
+    function fillVeg(ch) {
+      var d = ch.data, cx = _px, cz = _pz;
+      for (var k = 0; k < ch.n; k++) {
+        var o = k * 10, sp = d[o + 9], ex = d[o] - cx, ez = d[o + 2] - cz, d2 = ex * ex + ez * ez, pool;
+        if (sp === 3) { if (d2 > _r.sR2) continue; pool = d2 < _r.cast2 ? shadowPools[3] : (d2 < _r.sN2 ? nearPools[3] : farPools[3]); }
+        else { if (d2 > _r.tR2) continue; pool = d2 < _r.cast2 ? shadowPools[sp] : (d2 < _r.tN2 ? nearPools[sp] : farPools[sp]); }
+        poolPush(pool, d[o], d[o + 1], d[o + 2], d[o + 3], d[o + 4], d[o + 5], d[o + 6], d[o + 7], d[o + 8]);
       }
-      while (vegQueue.length && (now() - t0 < budgetMs)) {
-        var it = vegQueue.pop();
-        if (!vegChunks.has(it[3])) { vegChunks.set(it[3], genVegChunk(it[1], it[2])); vegDirty = true; }
-      }
-      if (vegDirty || (cx - vegLast.rx) * (cx - vegLast.rx) + (cz - vegLast.rz) * (cz - vegLast.rz) > 900) {
-        vegDirty = false; vegLast.rx = cx; vegLast.rz = cz;
-        rebuildVegPools(cx, cz);
-      }
-      // pasto: solo cerca de la camara
-      var GR = Q.grassR;
-      if (GR <= 0) { if (grassPool.count) { grassPool.count = 0; poolCommit(grassPool); grassChunks.clear(); } return; }
-      if ((cx - grassLast.x) * (cx - grassLast.x) + (cz - grassLast.z) * (cz - grassLast.z) > 64) {
-        grassLast.x = cx; grassLast.z = cz; grassQueue.length = 0;
-        var R2 = GR + GC * 0.71, c0 = Math.floor((cx - R2) / GC), c1 = Math.floor((cx + R2) / GC), d0 = Math.floor((cz - R2) / GC), d1 = Math.floor((cz + R2) / GC);
-        for (var d = d0; d <= d1; d++) {
-          for (var c = c0; c <= c1; c++) {
-            key = c + ',' + d; dx = (c + 0.5) * GC - cx; dz = (d + 0.5) * GC - cz;
-            if (dx * dx + dz * dz < R2 * R2 && !grassChunks.has(key)) grassQueue.push([dx * dx + dz * dz, c, d, key]);
-          }
-        }
-        grassQueue.sort(function (p, q) { return q[0] - p[0]; });
-        var gfar2 = (R2 + GC) * (R2 + GC);
-        grassChunks.forEach(function (ch, kk) { var p = kk.split(','); var ex = (+p[0] + 0.5) * GC - cx, ez = (+p[1] + 0.5) * GC - cz; if (ex * ex + ez * ez > gfar2) { grassChunks.delete(kk); grassDirty = true; } });
-      }
-      while (grassQueue.length && (now() - t0 < budgetMs)) {
-        var gi = grassQueue.pop();
-        if (!grassChunks.has(gi[3])) { grassChunks.set(gi[3], genGrassChunk(gi[1], gi[2])); grassDirty = true; }
-      }
-      if (grassDirty || (cx - grassLast.rx) * (cx - grassLast.rx) + (cz - grassLast.rz) * (cz - grassLast.rz) > 36) {
-        grassDirty = false; grassLast.rx = cx; grassLast.rz = cz;
-        grassPool.count = 0;
-        var gr2 = GR * GR;
-        grassChunks.forEach(function (ch) {
-          var dd = ch.data;
-          for (k = 0; k < ch.n; k++) {
-            var o = k * 8, ex = dd[o] - cx, ez = dd[o + 2] - cz;
-            if (ex * ex + ez * ez > gr2) continue;
-            poolPush(grassPool, dd[o], dd[o + 1], dd[o + 2], dd[o + 3], 2.4, dd[o + 4], dd[o + 5], dd[o + 6], dd[o + 7]);
-          }
-        });
-        poolCommit(grassPool);
+    }
+    function fillGrass(ch) {
+      var d = ch.data;
+      for (var k = 0; k < ch.n; k++) {
+        var o = k * 8, ex = d[o] - _px, ez = d[o + 2] - _pz;
+        if (ex * ex + ez * ez > _r.g2) continue;
+        poolPush(grassPool, d[o], d[o + 1], d[o + 2], d[o + 3], 2.4, d[o + 4], d[o + 5], d[o + 6], d[o + 7]);
       }
     }
     function rebuildVegPools(cx, cz) {
       var i;
-      for (i = 0; i < 4; i++) { nearPools[i].count = 0; farPools[i].count = 0; }
-      var tR2 = Q.treeR * Q.treeR, tN2 = Q.nearTreeR * Q.nearTreeR, sR2 = Q.shrubR * Q.shrubR, sN2 = Q.nearShrubR * Q.nearShrubR;
-      vegChunks.forEach(function (ch) {
-        var d = ch.data;
-        for (var k = 0; k < ch.n; k++) {
-          var o = k * 10, sp = d[o + 9], ex = d[o] - cx, ez = d[o + 2] - cz, d2 = ex * ex + ez * ez, pool;
-          if (sp === 3) { if (d2 > sR2) continue; pool = d2 < sN2 ? nearPools[3] : farPools[3]; }
-          else { if (d2 > tR2) continue; pool = d2 < tN2 ? nearPools[sp] : farPools[sp]; }
-          poolPush(pool, d[o], d[o + 1], d[o + 2], d[o + 3], d[o + 4], d[o + 5], d[o + 6], d[o + 7], d[o + 8]);
-        }
-      });
-      for (i = 0; i < 4; i++) { poolCommit(nearPools[i]); poolCommit(farPools[i]); }
+      for (i = 0; i < 4; i++) { shadowPools[i].count = 0; nearPools[i].count = 0; farPools[i].count = 0; }
+      var cast = Q.shadows ? Q.shadowRange + 25 : 0;
+      _px = cx; _pz = cz;
+      _r.tR2 = Q.treeR * Q.treeR; _r.tN2 = Q.nearTreeR * Q.nearTreeR; _r.sR2 = Q.shrubR * Q.shrubR; _r.sN2 = Q.nearShrubR * Q.nearShrubR; _r.cast2 = cast * cast;
+      vegLayer.map.forEach(fillVeg);
+      for (i = 0; i < 4; i++) { poolCommit(shadowPools[i]); poolCommit(nearPools[i]); poolCommit(farPools[i]); }
+    }
+    function rebuildGrassPool(cx, cz) {
+      grassPool.count = 0; _px = cx; _pz = cz; _r.g2 = Q.grassR * Q.grassR;
+      grassLayer.map.forEach(fillGrass);
+      poolCommit(grassPool);
+    }
+    function vegRingMax() { return Math.floor((Q.vegBand + VC / 2) / VC); }
+    // reconstruye los pools cuando la cola se vacio, o como mucho cada 250 ms mientras se carga
+    function maybeRebuild(L, cx, cz, moveM, rebuild) {
+      var mv = (cx - L.rx) * (cx - L.rx) + (cz - L.rz) * (cz - L.rz) > moveM * moveM;
+      if (!L.dirty && !mv) return;
+      var idle = !L.job && !L.queue.length, t = now();
+      if (!idle && t - L.lastRebuild < 250) return;
+      if (idle && !L.dirty && t - L.lastRebuild < 250) return;
+      L.dirty = false; L.rx = cx; L.rz = cz; L.lastRebuild = t;
+      rebuild(cx, cz);
+    }
+    function updateVegetation(cx, cz, budgetMs) {
+      var deadline = now() + budgetMs;
+      var L = vegLayer;
+      if ((cx - L.lx) * (cx - L.lx) + (cz - L.lz) * (cz - L.lz) > 625) { L.lx = cx; L.lz = cz; enqueue(L, cx, cz, Q.treeR + VC * 0.71, vegRingMax()); }
+      pumpLayer(L, deadline);
+      maybeRebuild(L, cx, cz, 30, rebuildVegPools);
+      var G2 = grassLayer;
+      if (Q.grassR <= 0) {
+        if (grassPool.count || G2.map.size) { G2.map.clear(); G2.queue.length = 0; G2.job = null; grassPool.count = 0; poolCommit(grassPool); }
+        return;
+      }
+      if ((cx - G2.lx) * (cx - G2.lx) + (cz - G2.lz) * (cz - G2.lz) > 64) { G2.lx = cx; G2.lz = cz; enqueue(G2, cx, cz, Q.grassR + GC * 0.71, null); }
+      pumpLayer(G2, deadline);
+      maybeRebuild(G2, cx, cz, 6, rebuildGrassPool);
     }
     /* ---- marcadores: arcos de salida/meta y postes de km ---- */
     var _pose = { x: 0, y: 0, z: 0, i: 0, hx: 1, hz: 0, tx: 1, ty: 0, tz: 0 };
@@ -2346,7 +2408,7 @@
 
     function configureShadows() {
       renderer.shadowMap.enabled = Q.shadows;
-      renderer.shadowMap.type = Q.shadowSoft ? T.PCFSoftShadowMap : T.PCFShadowMap;
+      renderer.shadowMap.type = T.PCFShadowMap;            // un solo tipo: cambiar de nivel no recompila por el tipo de sombra
       sun.castShadow = Q.shadows;
       if (sun.shadow.map) { sun.shadow.map.dispose(); sun.shadow.map = null; }
       if (Q.shadows) {
@@ -2366,17 +2428,19 @@
       });
       SPECIES.forEach(function (sp) { vegDepth[sp].needsUpdate = true; });
     }
-    var burst = true;
+    var burst = true;                 // solo en la creacion: llena el entorno inicial de una vez
     function applyLevel(next) {
+      var prevShadows = Q.shadows;
       level = next; Q = qualityPreset(level);
       setRoadShape();
       pixelRatio = Math.min(dpr, Q.pixelRatioMax);
       resize();
       configureShadows();
-      clearHiTiles(); hiLast.x = 1e12;
-      clearVegetation();
-      refreshMaterials();
-      burst = true;
+      // las teselas finas existentes se conservan (las nuevas usan el paso del nivel) y la vegetacion se
+      // regenera de a poco con la nueva densidad: sin congelar la rodada
+      hiLast.x = 1e12;
+      staleVegetation();
+      if (prevShadows !== Q.shadows) refreshMaterials();     // solo encender/apagar sombras exige recompilar
     }
     configureShadows();
     resize();
@@ -2400,7 +2464,7 @@
       return {
         fps: Math.round(10 / monitor.avg()) / 10, drawCalls: info.calls, triangles: info.triangles,
         instances: instanceCount(), quality: level, mode: qualityMode,
-        hiTiles: hiTiles.size, vegChunks: vegChunks.size, grassChunks: grassChunks.size, landcover: lc.synthetic ? 'sintetica' : 'ruta'
+        hiTiles: hiTiles.size, vegChunks: vegLayer.map.size, grassChunks: grassLayer.map.size, landcover: lc.synthetic ? 'sintetica' : 'ruta'
       };
     }
 
@@ -2467,9 +2531,8 @@
       if (waterNTex) waterNTex.offset.set(simTime * 0.011, simTime * 0.007);
 
       // streaming: malla fina del terreno y vegetacion alrededor de la camara
-      var budget = burst ? 2500 : 4;
-      updateHiTiles(px, pz, budget);
-      updateVegetation(px, pz, burst ? 2500 : 3);
+      updateHiTiles(px, pz, burst ? 2500 : 4);
+      updateVegetation(px, pz, burst ? 2500 : 4);
       burst = false;
 
       if (Q.shadows) {
@@ -2503,22 +2566,18 @@
       renderer.dispose();
       if (renderer.forceContextLoss) renderer.forceContextLoss();
       if (canvasEl.parentNode) canvasEl.parentNode.removeChild(canvasEl);
-      if (R.Scene3D && R.Scene3D._active === api) R.Scene3D._active = null;
     }
 
     var api = {
       setRiders: setRiders, setCameraMode: setCameraMode, setViewInsets: setViewInsets, render: render, resize: resize, dispose: dispose,
       setQuality: setQuality, getStats: getStats
     };
-    api._three = { scene: scene, renderer: renderer, camera: camera, envTex: envTex };   // depuracion (consola / QA)
-    R.Scene3D._active = api;
     return api;
   }
 
   R.Scene3D = {
     isSupported: isSupported,
     create: create,
-    _active: null,
     _internals: {
       decodeHeights: decodeHeights,
       projectPoint: projectPoint,

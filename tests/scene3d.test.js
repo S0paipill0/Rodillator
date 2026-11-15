@@ -238,7 +238,8 @@ test('calidad: auto = media en movil y alta en escritorio; presupuestos por nive
   const P = I.QUALITY_PRESETS;
   assert.deepStrictEqual([P.alta.density, P.media.density, P.baja.density], [1, 0.5, 0.25]);
   assert.deepStrictEqual([P.alta.shadowSize, P.media.shadowSize], [2048, 1024]);
-  assert.ok(P.alta.shadows && P.alta.shadowSoft && P.media.shadows && !P.baja.shadows);
+  assert.ok(P.alta.shadows && P.media.shadows && !P.baja.shadows);
+  assert.ok(P.media.nearTreeR <= 100, 'media: arboles detallados solo cerca');
   assert.deepStrictEqual([P.alta.grassR, P.media.grassR, P.baja.grassR], [150, 80, 0]);
   assert.deepStrictEqual([P.alta.vegBand, P.media.vegBand, P.baja.vegBand], [600, 350, 200]);
   assert.strictEqual(P.baja.pixelRatioMax, 1);
@@ -257,12 +258,12 @@ test('createFrameMonitor: baja solo tras 3 s seguidos con frames > 24 ms; ignora
   for (let k = 0; k < 400; k++) assert.strictEqual(m2.feed(0.5), false, 'dt > 0,25 s (pestaña oculta) no cuenta');
 });
 
-test('placeVegetation: determinista, independiente del troceo, sin nada a < 6 m del camino ni sobre agua/roca/nieve', () => {
+test('placeVegetation: determinista, independiente del troceo, sin nada a < 9 m (arboles) o 6 m (arbustos, pasto) del camino ni sobre agua/roca/nieve', () => {
   const L = I.LC;
   const path = straightPath(400);
   const idx = I.buildRoadIndex(path, 24);
   const q = {};
-  const roadDist = (x, z) => I.roadQuery(idx, x, z, 8, 0.1, q).d;
+  const roadDist = (x, z) => I.roadQuery(idx, x, z, 20, 0.1, q).d;
   const classAt = (x, z) => (z < -60 ? L.AGUA : z < -30 ? L.ROCA : z > 60 ? L.NIEVE : (x < 200 ? L.ARBOL : L.MATORRAL));
   const opts = { seed: 42, density: 1, classAt, roadDist };
   const rect = { x0: 0, x1: 400, z0: -100, z1: 100 };
@@ -273,8 +274,10 @@ test('placeVegetation: determinista, independiente del troceo, sin nada a < 6 m 
     const halves = I.placeVegetation({ x0: 0, x1: 170, z0: -100, z1: 100 }, layer, opts).concat(I.placeVegetation({ x0: 170, x1: 400, z0: -100, z1: 100 }, layer, opts));
     assert.strictEqual(halves.length, a.length, layer + ': la union de trozos = el total');
     for (const it of a) {
-      assert.ok(roadDist(it.x, it.z) >= I.VEG_MIN_ROAD, layer + ' a ' + roadDist(it.x, it.z).toFixed(2) + ' m del camino');
-      assert.ok(Math.abs(it.z) >= I.VEG_MIN_ROAD - 1e-9);
+      const minR = layer === 'tree' ? 9 : 6;
+      assert.strictEqual(I.VEG_LAYERS[layer].minRoad, minR);
+      assert.ok(roadDist(it.x, it.z) >= minR, layer + ' a ' + roadDist(it.x, it.z).toFixed(2) + ' m del camino');
+      assert.ok(Math.abs(it.z) >= minR - 1e-9);
       assert.ok(![L.AGUA, L.ROCA, L.NIEVE].includes(it.cls), layer + ' sobre clase ' + it.cls);
       assert.ok(it.x >= rect.x0 && it.x < rect.x1 && it.z >= rect.z0 && it.z < rect.z1);
       for (const k of ['r0', 'r1', 'r2', 'r3']) assert.ok(it[k] >= 0 && it[k] < 1);
