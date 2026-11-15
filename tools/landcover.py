@@ -11,8 +11,8 @@ import io
 import math
 
 import numpy as np
-from PIL import Image
-from scipy.ndimage import gaussian_filter, map_coordinates, uniform_filter, generic_filter, binary_opening, label, binary_closing
+from PIL import Image, ImageDraw
+from scipy.ndimage import gaussian_filter, map_coordinates, uniform_filter, binary_opening, label
 
 GRID = 256
 CLASSES = ["roca", "suelo", "pasto", "matorral", "arbol", "agua", "nieve", "urbano"]
@@ -23,11 +23,11 @@ BERMA_M = 15.0
 PARAMS = {
     "talagante-valle": dict(gr_shrub=-0.01, gr_pasto=0.01, gr_tree=0.01, pasto_v=0.24, tree_v=0.24, rock_slope=40.0,
                             urb_tex=0.04, urb_sat=0.42, urb_v=0.34, urb_slope=8.0, urb_gr=0.0),
-    "alpe-dhuez": dict(gr_shrub=0.03, gr_pasto=0.08, gr_tree=0.08, pasto_v=0.25, tree_v=0.25, snow_min_ele=1900.0,
+    "alpe-dhuez": dict(water_min_cells=12, gr_shrub=0.03, gr_pasto=0.08, gr_tree=0.08, pasto_v=0.25, tree_v=0.25, snow_min_ele=1900.0, tree_ele_max=2000.0,
                        urb_tex=0.02, urb_sat=0.34, urb_v=0.27, urb_slope=14.0, urb_gr=0.05),
     "el-yeso": dict(gr_shrub=0.0, tree_ele_max=2600.0, rock_slope=35.0, water_slope=3.0, snow_v=0.62),
-    "farellones": dict(gr_shrub=-0.105, shrub_ele_max=2600.0, tree_ele_max=2600.0, rock_slope=35.0, snow_v=0.62),
-    "caracoles-portillo": dict(gr_shrub=0.0, tree_ele_max=2600.0, rock_slope=35.0, snow_v=0.62),
+    "farellones": dict(shade_corr=True, gr_shrub=-0.06, shrub_ele_max=2600.0, tree_ele_max=2600.0, rock_slope=35.0, snow_v=0.62),
+    "caracoles-portillo": dict(cyan_br=0.95, cyan_gr=1.3, gr_shrub=0.0, tree_ele_max=2600.0, rock_slope=35.0, snow_v=0.62),
 }
 
 
@@ -46,6 +46,19 @@ def slope_deg(ele, bbox):
     dy = (bbox[3] - bbox[1]) * M_PER_DEG / (GRID - 1)
     gy, gx = np.gradient(ele, dy, dx)
     return np.degrees(np.arctan(np.hypot(gx, gy)))
+
+
+def hillshade(ele, bbox, az_deg=20.0, el_deg=55.0):
+    """Iluminación relativa 0..1 (sol al norte-noreste, hemisferio sur, Sentinel-2 media mañana)."""
+    lat0 = (bbox[1] + bbox[3]) / 2
+    dx = (bbox[2] - bbox[0]) * M_PER_DEG * math.cos(math.radians(lat0)) / (GRID - 1)
+    dy = (bbox[3] - bbox[1]) * M_PER_DEG / (GRID - 1)
+    gy, gx = np.gradient(ele, dy, dx)          # gy: dz/dfila (la fila crece hacia el sur)
+    nx, ny, nz = -gx, gy, np.ones_like(ele)
+    n = np.sqrt(nx * nx + ny * ny + nz * nz)
+    a, e = math.radians(az_deg), math.radians(el_deg)
+    hs = (nx * math.sin(a) * math.cos(e) + ny * math.cos(a) * math.cos(e) + nz * math.sin(e)) / n
+    return np.clip(hs, 0.0, 1.0)
 
 
 def features(tex, ele, bbox):
@@ -67,15 +80,17 @@ def features(tex, ele, bbox):
     samp = lambda a: map_coordinates(a, [rr, cc], order=1, mode="nearest")
     r, g, b = (samp(sm[:, :, k]) for k in range(3))
     tx = samp(std)
-    s = r + g + b + 1e-6
-    rn, gn, bn = r / s, g / s, b / s
     mx, mn = np.maximum(np.maximum(r, g), b), np.minimum(np.minimum(r, g), b)
+    hs = hillshade(ele, bbox)
+    gr = (g - r) / (g + r + 1e-6)
+    # verdor corregido por sombra: se resta la parte del verdor explicada linealmente por el hillshade
+    A = np.stack([hs.ravel() - hs.mean(), np.ones(hs.size)], axis=1)
+    coef = np.linalg.lstsq(A, gr.ravel(), rcond=None)[0]
+    gr_c = gr - coef[0] * (hs - hs.mean())
     return dict(
-        r=r, g=g, b=b, v=mx, sat=(mx - mn) / (mx + 1e-6),
+        hs=hs, gr_c=gr_c, r=r, g=g, b=b, v=mx, sat=(mx - mn) / (mx + 1e-6),
         lum=0.299 * r + 0.587 * g + 0.114 * b,
-        exg=2 * gn - rn - bn,
-        vari=(g - r) / (g + r - b + 1e-6),
-        gr=(g - r) / (g + r + 1e-6),
+        gr=gr,
         tex=tx, slope=slope_deg(ele, bbox), ele=ele,
     )
 
@@ -91,27 +106,28 @@ def mode3(cls):
 
 
 def classify(f, p):
-    h = f["v"].shape
-    cls = np.full(h, SUELO, dtype=np.uint8)
-    exg, gr, v, sat, tex, sl, ele = f["exg"], f["gr"], f["v"], f["sat"], f["tex"], f["slope"], f["ele"]
-    green = gr > p["gr_veg"]
+    cls = np.full(f["v"].shape, SUELO, dtype=np.uint8)
+    v, sat, tex, sl, ele = f["v"], f["sat"], f["tex"], f["slope"], f["ele"]
+    gr = f["gr_c"] if p["shade_corr"] else f["gr"]
     # --- base mineral: roca vs suelo
     gray = sat < p["sat_rock"]
     cls[(gray & (v > p["rock_v"])) | (sl > p["rock_slope"]) | (ele > p["rock_ele"])] = ROCA
-    # --- vegetación
-    veg = green
-    cls[veg & (gr > p["gr_shrub"]) & (ele < p["shrub_ele_max"])] = MATORRAL
-    cls[veg & (gr > p["gr_pasto"]) & (v >= p["pasto_v"])] = PASTO
-    cls[veg & (gr > p["gr_tree"]) & (v < p["tree_v"])] = ARBOL
-    cls[veg & (gr > p["gr_shrub"]) & (v < p["tree_v"] * 0.8) & (gr > p["gr_tree"] - 0.1)] = ARBOL
-    # en laderas muy empinadas y por sobre la cota de vegetación, no hay bosque
-    cls[(cls == ARBOL) & (ele > p["tree_ele_max"])] = MATORRAL
+    # --- vegetación (verdor gr y brillo; el brillo separa dosel denso de pradera)
+    cls[(gr > p["gr_shrub"]) & (ele < p["shrub_ele_max"])] = MATORRAL
+    cls[(gr > p["gr_pasto"]) & (v >= p["pasto_v"])] = PASTO
+    tree = (gr > p["gr_tree"]) & (v < p["tree_v"])
+    tree |= (gr > p["gr_shrub"]) & (v < p["tree_v"] * 0.8) & (gr > p["gr_tree"] - 0.1)
+    above = ele > p["tree_ele_max"]
+    cls[tree & ~above] = ARBOL
+    # sobre el límite arbóreo lo oscuro y verde pasa a pasto si el verdor es alto, si no a matorral
+    cls[tree & above] = np.where(gr[tree & above] > p["gr_alpine_pasto"], PASTO, MATORRAL)
     # --- urbano: alta frecuencia, baja saturación, zonas bajas y planas
     urb = (tex > p["urb_tex"]) & (sat < p["urb_sat"]) & (sl < p["urb_slope"]) & (ele < p["urb_ele_max"]) & (v > p["urb_v"]) & (gr < p["urb_gr"])
-    urb = binary_opening(urb, np.ones((2, 2), bool))
-    cls[urb] = URBANO
-    # --- agua: oscuro, azulado/verdoso y plano
-    water = (v < p["water_v"]) & (sl < p["water_slope"]) & (f["b"] >= f["r"] * p["water_br"]) & (tex < p["water_tex"])
+    cls[binary_opening(urb, np.ones((2, 2), bool))] = URBANO
+    # --- agua: oscura, azulada/verdosa y plana, o de tono cian claro y plana
+    dark = (v < p["water_v"]) & (f["b"] >= f["r"] * p["water_br"]) & (tex < p["water_tex"])
+    cyan = (f["b"] >= f["r"] * p["cyan_br"]) & (f["g"] >= f["r"] * p["cyan_gr"]) & (tex < p["water_tex"]) & (v < 0.6)
+    water = (dark | cyan) & (sl < p["water_slope"])
     water = binary_opening(water, np.ones((3, 3), bool))      # descarta franjas finas (autopistas, sombras alargadas)
     lab, n = label(water)
     for i in range(1, n + 1):
@@ -129,7 +145,7 @@ BASE = dict(
     pasto_v=0.30, tree_v=0.28, tree_ele_max=3300.0,
     sat_rock=0.20, rock_v=0.40, rock_slope=32.0, rock_ele=3700.0,
     urb_tex=0.05, urb_sat=0.22, urb_slope=14.0, urb_ele_max=1e9, urb_v=0.30, urb_gr=0.05,
-    water_v=0.34, water_slope=6.0, water_br=0.95, water_gr=0.15, water_tex=0.03, water_min_cells=6,
+    water_v=0.34, water_slope=6.0, water_br=0.95, cyan_br=9.0, cyan_gr=9.0, gr_alpine_pasto=0.3, shade_corr=False, water_tex=0.03, water_min_cells=6,
     snow_v=0.80, snow_s=0.16, snow_min_ele=2400.0, snow_tex=0.2,
 )
 
@@ -157,8 +173,8 @@ def route_cells(points, bbox, buffer_m=BERMA_M):
     rx, ry = buffer_m / cx, buffer_m / cy
     # una celda es el nodo (i, j) y "cubre" [j-0.5, j+0.5]: se marca todo nodo cuyo cuadrado toque el disco
     for x, y in zip(gx, gy):
-        j0, j1 = int(math.floor(x - rx - 0.5 + 1e-9)) + 1 - 1, int(math.ceil(x + rx + 0.5 - 1e-9))
-        i0, i1 = int(math.floor(y - ry - 0.5 + 1e-9)) + 1 - 1, int(math.ceil(y + ry + 0.5 - 1e-9))
+        j0, j1 = int(math.floor(x - rx - 0.5 + 1e-9)), int(math.ceil(x + rx + 0.5 - 1e-9))
+        i0, i1 = int(math.floor(y - ry - 0.5 + 1e-9)), int(math.ceil(y + ry + 0.5 - 1e-9))
         mark[max(i0, 0):min(i1, GRID - 1) + 1, max(j0, 0):min(j1, GRID - 1) + 1] = True
     return mark
 
@@ -181,7 +197,6 @@ COLORS = [(150, 150, 150), (176, 132, 84), (190, 214, 90), (140, 150, 60), (20, 
 
 
 def preview(route_data, cls, tex, path):
-    from PIL import ImageDraw
     h = 512
     t = Image.fromarray((tex * 255).astype(np.uint8)).resize((int(h * tex.shape[1] / tex.shape[0]), h), Image.LANCZOS)
     lut = np.array(COLORS, dtype=np.uint8)
