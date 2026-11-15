@@ -197,7 +197,17 @@
           range('f-bots', 'Ciclistas rivales (bots)', 0, 12, 1, settings.botsCount == null ? 6 : settings.botsCount,
             function (v) { return String(v); },
             function (v) { R.store.set({ settings: { botsCount: v } }); ctx.toast(v + (v === 1 ? ' rival' : ' rivales') + ' en pantalla.', 'ok'); },
-            'Los rivales azules te acompañan en las rutas. Con 0 ruedas solo.')
+            'Los rivales azules te acompañan en las rutas. Con 0 ruedas solo.'),
+          el('div', { 'class': 'field' }, [
+            el('label', { 'for': 'f-gfx' }, 'Calidad gráfica'),
+            el('select', { id: 'f-gfx', 'aria-describedby': 'f-gfx-h', onchange: function (ev) {
+              R.store.set({ settings: { graphicsQuality: ev.target.value } });
+              ctx.toast('Calidad gráfica: ' + ev.target.options[ev.target.selectedIndex].text + '.', 'ok');
+            } }, [['auto', 'Automática'], ['alta', 'Alta'], ['media', 'Media'], ['baja', 'Baja']].map(function (o) {
+              return el('option', { value: o[0], selected: (settings.graphicsQuality || 'auto') === o[0] }, o[1]);
+            })),
+            el('div', { 'class': 'hint', id: 'f-gfx-h' }, 'Paisaje 3D: árboles, pasto con viento y sombras. Automática usa Media en el celular y Alta en el computador, y baja sola si la escena va lenta.')
+          ])
         ]);
       }
 

@@ -751,7 +751,7 @@
       });
       try {
         if (R.Scene3D && R.Scene3D.isSupported()) {
-          scene = R.Scene3D.create(sceneEl, ride.route, { quality: 'auto' });
+          scene = R.Scene3D.create(sceneEl, ride.route, { quality: (R.store.normalizeGraphicsQuality || String)(settings.graphicsQuality || 'auto') });
           scene.setCameraMode(L.CAMERAS[ride.camIdx].id);
         } else scene = createFallbackView(sceneEl, ride.route);
       } catch (e) {

@@ -28,7 +28,7 @@ test('sin localStorage funciona solo en memoria', () => {
   assert.deepEqual(st.activities, []);
   assert.deepEqual(st.bests, {});
   assert.equal(st.schemaVersion, 1);
-  assert.deepEqual(st.settings, { reminderTime: '19:00', reminderDays: [1, 3, 5], ghostBoost: 0, botsCount: 6, units: 'metric', coach: { voice: true, beeps: true, volume: 0.9, verbosity: 'completo' } });
+  assert.deepEqual(st.settings, { reminderTime: '19:00', reminderDays: [1, 3, 5], ghostBoost: 0, botsCount: 6, units: 'metric', graphicsQuality: 'auto', coach: { voice: true, beeps: true, volume: 0.9, verbosity: 'completo' } });
   S.set({ profile: { name: 'Ana' } });
   S.flush();
   assert.equal(S.get().profile.name, 'Ana');
@@ -226,4 +226,17 @@ test('settings.coach: estados guardados sin coach o con coach parcial se complet
   S.importJSON(JSON.stringify({ schemaVersion: 1, settings: { coach: { volume: 0.4 } } }));
   assert.deepEqual(S.get().settings.coach, { voice: true, beeps: true, volume: 0.4, verbosity: 'completo' });
   assert.equal(S.get().settings.botsCount, 6);
+});
+
+test('graphicsQuality: default auto, normaliza valores inválidos al cargar y al guardar', () => {
+  S.reset();
+  assert.equal(S.get().settings.graphicsQuality, 'auto');
+  S.set({ settings: { graphicsQuality: 'media' } });
+  assert.equal(S.get().settings.graphicsQuality, 'media');
+  S.set({ settings: { graphicsQuality: 'ultra' } });
+  assert.equal(S.get().settings.graphicsQuality, 'auto');
+  assert.equal(S.normalizeGraphicsQuality('baja'), 'baja');
+  assert.equal(S.normalizeGraphicsQuality(undefined), 'auto');
+  S.importJSON(JSON.stringify({ settings: { graphicsQuality: 42 } }));
+  assert.equal(S.get().settings.graphicsQuality, 'auto');
 });

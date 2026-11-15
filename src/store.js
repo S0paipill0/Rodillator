@@ -14,10 +14,14 @@
       profile: null,
       plan: null,
       activities: [],
-      settings: { reminderTime: '19:00', reminderDays: [1, 3, 5], ghostBoost: 0, botsCount: 6, units: 'metric', coach: { voice: true, beeps: true, volume: 0.9, verbosity: 'completo' } },
+      settings: { reminderTime: '19:00', reminderDays: [1, 3, 5], ghostBoost: 0, botsCount: 6, units: 'metric', graphicsQuality: 'auto', coach: { voice: true, beeps: true, volume: 0.9, verbosity: 'completo' } },
       bests: {}
     };
   }
+
+  var GRAPHICS_QUALITIES = ['auto', 'alta', 'media', 'baja'];
+  // Calidad grafica de la escena 3D: valores fuera de la lista vuelven a 'auto'.
+  function normalizeGraphicsQuality(q) { return GRAPHICS_QUALITIES.indexOf(q) >= 0 ? q : 'auto'; }
 
   function clone(v) { return v === undefined ? v : JSON.parse(JSON.stringify(v)); }
   function isObj(v) { return v !== null && typeof v === 'object' && !Array.isArray(v); }
@@ -42,6 +46,7 @@
       bests: isObj(raw.bests) ? raw.bests : {}
     };
     s.settings.coach = Object.assign({}, defaults().settings.coach, isObj(s.settings.coach) ? s.settings.coach : {});
+    s.settings.graphicsQuality = normalizeGraphicsQuality(s.settings.graphicsQuality);
     return s;
   }
 
@@ -218,7 +223,10 @@
     var next = Object.assign({}, state);
     Object.keys(patch).forEach(function (k) {
       if (k === 'schemaVersion' || k === 'updatedAt') return;
-      if (k === 'settings' && isObj(patch.settings)) next.settings = Object.assign({}, state.settings, patch.settings);
+      if (k === 'settings' && isObj(patch.settings)) {
+        next.settings = Object.assign({}, state.settings, patch.settings);
+        next.settings.graphicsQuality = normalizeGraphicsQuality(next.settings.graphicsQuality);
+      }
       else next[k] = patch[k];
     });
     next.updatedAt = Date.now();
@@ -276,6 +284,7 @@
     flush: flush,
     isPersistent: isPersistent,
     load: function () { load(); notify(); return state; },
+    normalizeGraphicsQuality: normalizeGraphicsQuality,
     _compact: compact,
     _defaults: defaults
   };

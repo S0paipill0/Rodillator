@@ -175,3 +175,207 @@ test('viewOffsetFor desplaza el centro óptico al centro de la zona libre', () =
   assert.equal(400 / 2 - o.x, (20 + 340) / 2);
   assert.equal(800 / 2 - o.y, (100 + 500) / 2);
 });
+
+/* ---------------- Escenario realista (Tarea 12) ---------------- */
+
+function mkGrid(w, h, fn, cell = 70) {
+  const data = new Float32Array(w * h);
+  for (let j = 0; j < h; j++) for (let i = 0; i < w; i++) data[j * w + i] = fn(i, j);
+  return { w, h, x0: 0, z0: 0, x1: (w - 1) * cell, z1: (h - 1) * cell, data, base: 0, vs: 1, real: true };
+}
+function straightPath(len = 400, step = 5) {
+  const n = Math.floor(len / step) + 1;
+  const p = { n, D: new Float64Array(n), X: new Float64Array(n), Z: new Float64Array(n), Y: new Float64Array(n) };
+  for (let i = 0; i < n; i++) { p.D[i] = i * step; p.X[i] = i * step; p.Z[i] = 0; p.Y[i] = 10; }
+  return p;
+}
+
+test('decodeLandcover: mapea clases por nombre (con o sin tildes), indice desconocido -> suelo, valida tamano', () => {
+  const L = I.LC;
+  assert.strictEqual(I.decodeLandcover(null), null);
+  assert.strictEqual(I.decodeLandcover({ width: 2, height: 2 }), null);
+  const b64 = Buffer.from([0, 1, 2, 9]).toString('base64');
+  // orden distinto al canonico: el decodificador usa los nombres
+  const lc = I.decodeLandcover({ width: 2, height: 2, classes: ['Árbol', 'agua', 'NIEVE'], data: b64 });
+  assert.deepStrictEqual(Array.from(lc.data), [L.ARBOL, L.AGUA, L.NIEVE, L.SUELO]);
+  assert.strictEqual(lc.synthetic, false);
+  const canon = I.decodeLandcover({ width: 2, height: 2, data: Buffer.from([0, 3, 5, 7]).toString('base64') });
+  assert.deepStrictEqual(Array.from(canon.data), [L.ROCA, L.MATORRAL, L.AGUA, L.URBANO]);
+  assert.throws(() => I.decodeLandcover({ width: 3, height: 3, data: b64 }), /bytes/);
+});
+
+test('deriveLandcover: nieve > 3400 m, roca > 2800 m o pendiente fuerte, valle con pasto/arboles, determinista', () => {
+  const L = I.LC;
+  const flatLow = I.deriveLandcover(mkGrid(16, 16, () => 600), 7);
+  assert.ok(Array.from(flatLow.data).every((c) => c === L.PASTO || c === L.ARBOL), 'valle: pasto o arboles');
+  assert.ok(Array.from(flatLow.data).some((c) => c === L.ARBOL) && Array.from(flatLow.data).some((c) => c === L.PASTO));
+  assert.ok(Array.from(I.deriveLandcover(mkGrid(8, 8, () => 3600), 1).data).every((c) => c === L.NIEVE));
+  assert.ok(Array.from(I.deriveLandcover(mkGrid(8, 8, () => 3000), 1).data).every((c) => c === L.ROCA));
+  const cliff = I.deriveLandcover(mkGrid(8, 8, (i) => 1000 + i * 70), 1);      // 45 grados
+  assert.ok(Array.from(cliff.data).every((c) => c === L.ROCA));
+  const slope = I.deriveLandcover(mkGrid(8, 8, (i) => 1000 + i * 70 * 0.55), 1); // ~29 grados: ladera
+  assert.ok(Array.from(slope.data).every((c) => c === L.SUELO || c === L.MATORRAL));
+  assert.deepStrictEqual(I.deriveLandcover(mkGrid(16, 16, () => 600), 7).data, flatLow.data, 'misma semilla, mismo resultado');
+  assert.strictEqual(flatLow.synthetic, true);
+  // landcoverAt: vecino mas cercano en coordenadas de mundo
+  const g = mkGrid(2, 2, () => 0, 100);
+  const lc = { w: 2, h: 2, data: new Uint8Array([L.ROCA, L.SUELO, L.AGUA, L.NIEVE]) };
+  assert.strictEqual(I.landcoverAt(lc, g, 10, 10), L.ROCA);
+  assert.strictEqual(I.landcoverAt(lc, g, 90, 5), L.SUELO);
+  assert.strictEqual(I.landcoverAt(lc, g, 5, 95), L.AGUA);
+  assert.strictEqual(I.landcoverAt(lc, g, 1e6, 1e6), L.NIEVE, 'acotado al borde');
+});
+
+test('calidad: auto = media en movil y alta en escritorio; presupuestos por nivel; bajada de un nivel', () => {
+  assert.strictEqual(I.resolveQuality('auto', { coarse: true, width: 1400 }), 'media');
+  assert.strictEqual(I.resolveQuality('auto', { coarse: false, width: 800 }), 'media');
+  assert.strictEqual(I.resolveQuality('auto', { coarse: false, width: 1280 }), 'alta');
+  assert.strictEqual(I.resolveQuality('baja', { coarse: false, width: 1280 }), 'baja');
+  assert.strictEqual(I.resolveQuality('ultra', { width: 1280 }), 'alta', 'valor invalido = auto');
+  assert.strictEqual(I.downgradeQuality('alta'), 'media');
+  assert.strictEqual(I.downgradeQuality('media'), 'baja');
+  assert.strictEqual(I.downgradeQuality('baja'), 'baja');
+  const P = I.QUALITY_PRESETS;
+  assert.deepStrictEqual([P.alta.density, P.media.density, P.baja.density], [1, 0.5, 0.25]);
+  assert.deepStrictEqual([P.alta.shadowSize, P.media.shadowSize], [2048, 1024]);
+  assert.ok(P.alta.shadows && P.alta.shadowSoft && P.media.shadows && !P.baja.shadows);
+  assert.deepStrictEqual([P.alta.grassR, P.media.grassR, P.baja.grassR], [150, 80, 0]);
+  assert.deepStrictEqual([P.alta.vegBand, P.media.vegBand, P.baja.vegBand], [600, 350, 200]);
+  assert.strictEqual(P.baja.pixelRatioMax, 1);
+  assert.ok(P.media.shadowRange < P.alta.shadowRange, 'media: sombras solo cerca');
+});
+
+test('createFrameMonitor: baja solo tras 3 s seguidos con frames > 24 ms; ignora pausas', () => {
+  const run = (dt, secs, m = I.createFrameMonitor()) => { let fired = 0; for (let t = 0; t < secs; t += dt) if (m.feed(dt)) fired++; return fired; };
+  assert.strictEqual(run(1 / 60, 30), 0, '60 fps nunca baja');
+  assert.strictEqual(run(0.022, 30), 0, '22 ms tampoco');
+  const m = I.createFrameMonitor();
+  let firstAt = -1, t = 0;
+  for (; t < 10; t += 0.03) if (m.feed(0.03)) { firstAt = t; break; }
+  assert.ok(firstAt > 3 && firstAt < 6.5, 'baja tras calentamiento + 3 s (t=' + firstAt.toFixed(2) + ')');
+  const m2 = I.createFrameMonitor();
+  for (let k = 0; k < 400; k++) assert.strictEqual(m2.feed(0.5), false, 'dt > 0,25 s (pestaña oculta) no cuenta');
+});
+
+test('placeVegetation: determinista, independiente del troceo, sin nada a < 6 m del camino ni sobre agua/roca/nieve', () => {
+  const L = I.LC;
+  const path = straightPath(400);
+  const idx = I.buildRoadIndex(path, 24);
+  const q = {};
+  const roadDist = (x, z) => I.roadQuery(idx, x, z, 8, 0.1, q).d;
+  const classAt = (x, z) => (z < -60 ? L.AGUA : z < -30 ? L.ROCA : z > 60 ? L.NIEVE : (x < 200 ? L.ARBOL : L.MATORRAL));
+  const opts = { seed: 42, density: 1, classAt, roadDist };
+  const rect = { x0: 0, x1: 400, z0: -100, z1: 100 };
+  for (const layer of ['tree', 'shrub', 'grass']) {
+    const a = I.placeVegetation(rect, layer, opts);
+    assert.ok(a.length > 0, layer + ' genera instancias');
+    assert.deepStrictEqual(I.placeVegetation(rect, layer, opts), a, layer + ' determinista');
+    const halves = I.placeVegetation({ x0: 0, x1: 170, z0: -100, z1: 100 }, layer, opts).concat(I.placeVegetation({ x0: 170, x1: 400, z0: -100, z1: 100 }, layer, opts));
+    assert.strictEqual(halves.length, a.length, layer + ': la union de trozos = el total');
+    for (const it of a) {
+      assert.ok(roadDist(it.x, it.z) >= I.VEG_MIN_ROAD, layer + ' a ' + roadDist(it.x, it.z).toFixed(2) + ' m del camino');
+      assert.ok(Math.abs(it.z) >= I.VEG_MIN_ROAD - 1e-9);
+      assert.ok(![L.AGUA, L.ROCA, L.NIEVE].includes(it.cls), layer + ' sobre clase ' + it.cls);
+      assert.ok(it.x >= rect.x0 && it.x < rect.x1 && it.z >= rect.z0 && it.z < rect.z1);
+      for (const k of ['r0', 'r1', 'r2', 'r3']) assert.ok(it[k] >= 0 && it[k] < 1);
+    }
+  }
+  const trees = I.placeVegetation(rect, 'tree', opts);
+  assert.ok(trees.filter((t) => t.cls === L.ARBOL).length > 3 * trees.filter((t) => t.cls === L.MATORRAL).length, 'el bosque es mas denso que el matorral');
+  assert.notDeepStrictEqual(I.placeVegetation(rect, 'tree', Object.assign({}, opts, { seed: 43 })), trees, 'otra semilla, otra disposicion');
+});
+
+test('placeVegetation: densidad por calidad (alta 100 %, media ~50 %, baja ~25 %)', () => {
+  const L = I.LC;
+  const opts = (density) => ({ seed: 9, density, classAt: () => L.PASTO, roadDist: () => 1e9 });
+  const rect = { x0: -400, x1: 400, z0: -400, z1: 400 };
+  const P = I.QUALITY_PRESETS;
+  for (const layer of ['tree', 'shrub', 'grass']) {
+    const n1 = I.placeVegetation(rect, layer, opts(P.alta.density)).length;
+    const n2 = I.placeVegetation(rect, layer, opts(P.media.density)).length;
+    const n4 = I.placeVegetation(rect, layer, opts(P.baja.density)).length;
+    assert.ok(n1 > 0);
+    assert.ok(Math.abs(n2 / n1 - 0.5) < 0.12, layer + ' media ' + (n2 / n1).toFixed(2));
+    assert.ok(Math.abs(n4 / n1 - 0.25) < 0.08, layer + ' baja ' + (n4 / n1).toFixed(2));
+  }
+  // la densidad esperada coincide con la probabilidad por celda
+  const g = I.placeVegetation(rect, 'grass', opts(1)).length, cells = (800 / I.VEG_LAYERS.grass.spacing) ** 2;
+  assert.ok(Math.abs(g / cells - I.VEG_LAYERS.grass.prob[L.PASTO]) < 0.02);
+});
+
+test('roadQuery: distancia, lado, meseta e influencia que se anula en R', () => {
+  const path = straightPath(400);
+  const idx = I.buildRoadIndex(path, 24);
+  const q = {};
+  I.roadQuery(idx, 100, 3, 40, 6, q);
+  assert.ok(Math.abs(q.d - 3) < 1e-9 && q.k === 1 && Math.abs(q.yb - 10) < 1e-9);
+  // derecha del rumbo (+x) = +z (convencion del modulo: derecha = (-hz, hx))
+  assert.ok(q.sd > 0);
+  I.roadQuery(idx, 100, -3, 40, 6, q);
+  assert.ok(q.sd < 0);
+  I.roadQuery(idx, 100, 23, 40, 6, q);
+  assert.ok(q.k > 0 && q.k < 1);
+  I.roadQuery(idx, 100, 39.9, 40, 6, q);
+  assert.ok(q.k < 0.01);
+  I.roadQuery(idx, 100, 80, 40, 6, q);
+  assert.strictEqual(q.k, 0);
+  assert.ok(q.d > 40, 'fuera del radio: d = R + 1');
+});
+
+test('smoothPath conserva puntos y distancias originales; curveRadii mide el radio de una curva', () => {
+  const r = 50, n = 40, p = { n, D: new Float64Array(n), X: new Float64Array(n), Z: new Float64Array(n), Y: new Float64Array(n) };
+  for (let i = 0; i < n; i++) { const a = i * 0.1; p.X[i] = r * Math.sin(a); p.Z[i] = r - r * Math.cos(a); p.D[i] = r * a; p.Y[i] = i; }
+  const s = I.smoothPath(p, 4);
+  assert.strictEqual(s.n, (n - 1) * 4 + 1);
+  for (let i = 0; i < n; i++) {
+    assert.ok(Math.abs(s.X[i * 4] - p.X[i]) < 1e-9 && Math.abs(s.Z[i * 4] - p.Z[i]) < 1e-9 && s.D[i * 4] === p.D[i]);
+  }
+  for (let i = 1; i < s.n; i++) assert.ok(s.D[i] > s.D[i - 1] && s.Y[i] >= s.Y[i - 1], 'distancia y altura monotonas');
+  // puntos intermedios sobre el circulo (spline suave, no cuerda)
+  const mid = 4 * 10 + 2, dc = Math.hypot(s.X[mid], s.Z[mid] - r);
+  assert.ok(Math.abs(dc - r) < 0.05, 'radio ' + dc);
+  const rad = I.curveRadii(s, 12);
+  assert.ok(Math.abs(Math.abs(rad[60]) - r) < 3, 'radio medido ' + rad[60]);
+  assert.ok(rad[60] > 0, 'gira a la derecha (+z con rumbo +x)');
+  const straight = I.curveRadii(straightPath(200), 12);
+  assert.ok(straight[20] > 1e5, 'recta: radio enorme');
+});
+
+test('centerLineColor: blanca en Chile y Europa, amarilla en America del Norte y Brasil', () => {
+  assert.strictEqual(I.centerLineColor('Chile'), 'blanca');
+  assert.strictEqual(I.centerLineColor('Francia'), 'blanca');
+  assert.strictEqual(I.centerLineColor(undefined), 'blanca');
+  assert.strictEqual(I.centerLineColor('Estados Unidos'), 'amarilla');
+  assert.strictEqual(I.centerLineColor('México'), 'amarilla');
+  assert.strictEqual(I.centerLineColor('Brasil'), 'amarilla');
+});
+
+test('cielo y luz: sol de tarde al NO (sur) o SO (norte), Preetham azul arriba, ACES en [0,1]', () => {
+  const s = I.sunDirection(-33);
+  assert.ok(Math.abs(Math.hypot(...s) - 1) < 1e-9);
+  assert.ok(Math.abs(Math.asin(s[1]) * 180 / Math.PI - 35) < 1e-6);
+  assert.ok(s[0] < 0 && s[2] < 0, 'noroeste: x oeste, z = -norte');
+  const n = I.sunDirection(45);
+  assert.ok(n[0] < 0 && n[2] > 0, 'suroeste en el hemisferio norte');
+  const p = { turbidity: 2, rayleigh: 2, mieCoefficient: 0.003, mieDirectionalG: 0.8 };
+  const zen = I.preethamSky([0, 1, 0], s, p, [0, 0, 0]);
+  const hor = I.preethamSky([1, 0.02, 0], s, p, [0, 0, 0]);
+  assert.ok(zen[2] > zen[0] * 1.8, 'cenit azul');
+  assert.ok(hor[0] / hor[2] > zen[0] / zen[2], 'horizonte mas blanco que el cenit');
+  let prev = -1;
+  for (const v of [0, 0.1, 0.5, 1, 2, 5, 20]) {
+    const o = I.acesFilmic([v, v, v], 0.6, [0, 0, 0]);
+    assert.ok(o.every((c) => c >= 0 && c <= 1));
+    assert.ok(o[1] >= prev); prev = o[1];
+  }
+});
+
+test('fbmTile: valores en [0,1) y textura repetible sin costura', () => {
+  const S = 64, f = I.fbmTile(S, [4, 8], [0.6, 0.4], 3);
+  assert.strictEqual(f.length, S * S);
+  assert.ok(Array.from(f).every((v) => v >= 0 && v < 1));
+  // borde derecho vs izquierdo: diferencia similar a la de pixeles vecinos interiores
+  let edge = 0, inner = 0;
+  for (let y = 0; y < S; y++) { edge += Math.abs(f[y * S] - f[y * S + S - 1]); inner += Math.abs(f[y * S + 31] - f[y * S + 32]); }
+  assert.ok(edge < inner * 3 + 0.05, 'sin costura (borde ' + edge.toFixed(3) + ' vs interior ' + inner.toFixed(3) + ')');
+});
