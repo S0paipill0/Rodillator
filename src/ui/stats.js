@@ -459,7 +459,24 @@
     return { activities: acts, bests: computeBests(acts, routes), ftpEnd: ftpEnd };
   }
 
+  // Pila de modales (lógica pura): solo el superior reacciona a Escape/Tab/clic en el fondo.
+  function createModalStack() {
+    var items = [];
+    return {
+      push: function (m) { items.push(m); return m; },
+      remove: function (m) { var i = items.indexOf(m); if (i >= 0) items.splice(i, 1); return i >= 0; },
+      top: function () { return items[items.length - 1] || null; },
+      isTop: function (m) { return items[items.length - 1] === m; },
+      size: function () { return items.length; },
+      // Cierra de arriba hacia abajo; si un close() no se quita solo de la pila, se quita aquí (evita bucles).
+      closeAll: function () {
+        while (items.length) { var m = items[items.length - 1]; try { m.close(); } catch (e) { /* noop */ } if (items[items.length - 1] === m) items.pop(); }
+      },
+    };
+  }
+
   R.statsLogic = {
+    createModalStack: createModalStack,
     PERIODS: PERIODS, DEMO_ROUTES: DEMO_ROUTES, DEFAULT_DURATIONS: DEFAULT_DURATIONS,
     fmtDate: fmtDate, parseDate: parseDate, addDays: addDays, daysBetween: daysBetween, localDate: localDate, weekStart: weekStart,
     dayLabel: dayLabel, zoneDefs: zoneDefs, samplesTrimmed: samplesTrimmed, countTrimmed: countTrimmed, dayLabelYear: dayLabelYear,
@@ -547,33 +564,13 @@
   function fmtSignedDur(s) { var a = Math.abs(Math.round(s)); return (s > 0 ? '+' : s < 0 ? '−' : '') + fmtDur(a); }
 
   // ---------- modales ----------
+  // Siempre el modal propio (nunca R.ui.modal: no soporta onClose ni la pila, y dejaría gráficos sin destruir).
   // Pila de modales abiertos (confirmaciones anidadas sobre el detalle): solo el superior reacciona a Escape/Tab.
-  var modalStack = [];
-  function topModal() { return modalStack[modalStack.length - 1] || null; }
-  function closeAllModals() { while (modalStack.length) modalStack[modalStack.length - 1].close(); }
-
-  // Usa R.ui.modal solo si existe y se comporta como se espera (devuelve un manejador con close() y monta nuestro cuerpo en el documento);
-  // si no, cae al modal propio.
-  function openShellModal(opts) {
-    if (!(R.ui && typeof R.ui.modal === 'function')) return null;
-    var body = h('div', { class: 'st-modal-body st-modal-body--shell' }), handle = null;
-    try { handle = R.ui.modal({ title: opts.title || '', content: body, body: body, wide: !!opts.wide, onClose: function () { if (api && !api.closed) api.close(true); } }); } catch (e) { handle = null; }
-    var closeFn = handle && (typeof handle.close === 'function' ? handle.close.bind(handle) : (typeof handle === 'function' ? handle : null));
-    if (!closeFn || !body.isConnected) { if (closeFn) { try { closeFn(); } catch (e) { /* noop */ } } return null; }
-    var api = { el: body, closed: false, onClose: null, shell: true,
-      close: function (fromShell) {
-        if (api.closed) return; api.closed = true;
-        var i = modalStack.indexOf(api); if (i >= 0) modalStack.splice(i, 1);
-        if (!fromShell) { try { closeFn(); } catch (e) { /* noop */ } }
-        if (api.onClose) api.onClose();
-      } };
-    modalStack.push(api);
-    return api;
-  }
+  var modalStack = L.createModalStack();
+  function topModal() { return modalStack.top(); }
+  function closeAllModals() { modalStack.closeAll(); }
 
   function openModal(opts) {
-    var viaShell = openShellModal(opts);
-    if (viaShell) return viaShell;
     var prevFocus = document.activeElement;
     var body = h('div', { class: 'st-modal-body' });
     var titleId = 'st-modal-t-' + Math.random().toString(36).slice(2, 7);
@@ -586,7 +583,7 @@
       close: function () {
         if (api.closed) return; api.closed = true;
         document.removeEventListener('keydown', onKey, true);
-        var i = modalStack.indexOf(api); if (i >= 0) modalStack.splice(i, 1);
+        modalStack.remove(api);
         if (back.parentNode) back.parentNode.removeChild(back);
         if (api.onClose) api.onClose();
         var t = topModal(); // el foco vuelve al modal inferior o al elemento que abrió el primero
@@ -595,7 +592,7 @@
       },
       focusFirst: function () { var f = dlg.querySelector('button'); if (f) f.focus(); } };
     function onKey(ev) {
-      if (topModal() !== api) return; // solo el modal superior
+      if (!modalStack.isTop(api)) return; // solo el modal superior
       if (ev.key === 'Escape') { ev.stopImmediatePropagation(); ev.preventDefault(); api.close(); }
       else if (ev.key === 'Tab') {
         var f = dlg.querySelectorAll('button,input,select,textarea,[tabindex]:not([tabindex="-1"])');
@@ -605,7 +602,7 @@
         else if (!ev.shiftKey && document.activeElement === last) { ev.preventDefault(); first.focus(); }
       }
     }
-    back.addEventListener('pointerdown', function (ev) { if (ev.target === back && topModal() === api) api.close(); });
+    back.addEventListener('pointerdown', function (ev) { if (ev.target === back && modalStack.isTop(api)) api.close(); });
     document.addEventListener('keydown', onKey, true);
     document.body.appendChild(back);
     modalStack.push(api);

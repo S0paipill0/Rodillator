@@ -191,3 +191,44 @@ test('zonas: nombres y colores salen de R.training.zones (fuente única)', () =>
   assert.strictEqual(L.ZONE_NAMES, undefined);
   assert.strictEqual(L.zoneDefs(0).length, 7); // sin FTP usa un valor por defecto, no falla
 });
+
+// Réplica mínima del cableado de la UI: cada modal se quita de la pila al cerrarse y destruye sus gráficos en onClose.
+function fakeModal(stack, nCharts) {
+  const charts = Array.from({ length: nCharts }, () => ({ destroyed: false, destroy() { this.destroyed = true; } }));
+  const m = { closed: false, charts, close() { if (m.closed) return; m.closed = true; stack.remove(m); charts.forEach((c) => c.destroy()); } };
+  stack.push(m);
+  return m;
+}
+
+test('pila de modales: cerrar la confirmación deja el detalle abierto', () => {
+  const st = L.createModalStack();
+  assert.strictEqual(st.size(), 0); assert.strictEqual(st.top(), null);
+  const detail = fakeModal(st, 3), confirm = fakeModal(st, 0);
+  assert.strictEqual(st.size(), 2);
+  assert.ok(st.isTop(confirm)); assert.ok(!st.isTop(detail), 'el detalle no debe reaccionar a Escape mientras hay confirmación');
+  // Escape: solo lo atiende el modal superior (el de abajo comprueba isTop y no hace nada)
+  [detail, confirm].forEach((m) => { if (st.isTop(m)) m.close(); });
+  assert.strictEqual(confirm.closed, true);
+  assert.strictEqual(detail.closed, false);
+  assert.strictEqual(st.size(), 1); assert.ok(st.isTop(detail));
+  assert.ok(detail.charts.every((c) => !c.destroyed), 'los gráficos del detalle siguen vivos');
+});
+
+test('pila de modales: destroy (closeAll) vacía la pila y destruye todos los gráficos', () => {
+  const st = L.createModalStack();
+  const a = fakeModal(st, 3), b = fakeModal(st, 2);
+  st.closeAll();
+  assert.strictEqual(st.size(), 0);
+  assert.ok(a.closed && b.closed);
+  assert.ok(a.charts.concat(b.charts).every((c) => c.destroyed));
+  st.closeAll(); // idempotente
+  assert.strictEqual(st.size(), 0);
+});
+
+test('pila de modales: closeAll termina aunque un close() no se quite de la pila', () => {
+  const st = L.createModalStack();
+  st.push({ close() { /* mal implementado: no hace remove */ } });
+  st.push({ close() { throw new Error('falla al cerrar'); } });
+  st.closeAll();
+  assert.strictEqual(st.size(), 0);
+});
