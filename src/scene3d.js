@@ -807,6 +807,84 @@
   var ROAD_VS_MAIN = 'transformed.y += aLift * smoothstep(uRoadFar.z, uRoadFar.w, distance(position.xz, uRoadFar.xy));';
 
   /* ------------------------------------------------------------------ */
+  /* Modelo glTF del ciclista (opcional: window.R_CYCLIST_GLB, base64)    */
+  /* ------------------------------------------------------------------ */
+
+  // Se decodifica una sola vez por pagina y se comparte entre escenas: geometrias, clip y textura del rostro.
+  // Cada escena crea sus propios materiales y clones (Object3D.clone comparte las geometrias).
+  var cyclistAsset = null;     // { promise, tpl }
+  function loadCyclistAsset() {
+    if (cyclistAsset) return cyclistAsset.promise;
+    var T = G.THREE, b64 = G.R_CYCLIST_GLB;
+    if (!T || !T.GLTFLoader || typeof b64 !== 'string' || b64.length < 16 || !R.cyclist) return null;
+    cyclistAsset = { tpl: null, promise: null };
+    cyclistAsset.promise = new Promise(function (resolve, reject) {
+      var bytes = base64ToBytes(b64);
+      new T.GLTFLoader().parse(bytes.buffer, '', resolve, reject);
+    }).then(function (gltf) {
+      cyclistAsset.tpl = prepareCyclistTemplate(T, gltf);
+      return cyclistAsset.tpl;
+    }).catch(function (e) {
+      if (G.console) G.console.warn('Scene3D: no se pudo cargar el modelo del ciclista; se usan ciclistas procedurales.', e);
+      return null;
+    });
+    return cyclistAsset.promise;
+  }
+
+  // Pivotes de rueda en el centro de cada buje, materiales por papel y conteos para estadisticas.
+  function prepareCyclistTemplate(T, gltf) {
+    var CY = R.cyclist, root = gltf.scene;
+    root.updateMatrixWorld(true);
+    var sides = { rear: [], front: [] }, _p = new T.Vector3();
+    root.traverse(function (o) {
+      if (!o.isMesh) return;
+      var side = CY.classifyWheelNode(o.name, o.getWorldPosition(_p));
+      if (side) sides[side].push(o);
+    });
+    var wheelR = 0, wheels = 0;
+    ['rear', 'front'].forEach(function (side) {
+      var parts = sides[side];
+      if (!parts.length) return;
+      var box = new T.Box3();
+      parts.forEach(function (o) { box.expandByObject(o); });
+      var pivot = new T.Object3D();
+      pivot.name = '__rueda_' + side;
+      pivot.position.set(0, (box.min.y + box.max.y) / 2, (box.min.z + box.max.z) / 2);
+      root.add(pivot);
+      pivot.updateMatrixWorld(true);
+      parts.forEach(function (o) { pivot.attach(o); });
+      wheelR = Math.max(wheelR, (box.max.y - box.min.y) / 2);
+      wheels++;
+    });
+    var roles = new Map(), geos = new Set(), textures = new Set(), meshes = 0, tris = 0;
+    root.traverse(function (o) {
+      if (!o.isMesh) return;
+      meshes++;
+      o.castShadow = true;
+      geos.add(o.geometry);
+      var g = o.geometry, idx = g.index;
+      tris += (idx ? idx.count : g.attributes.position.count) / 3;
+      var m = o.material;
+      if (!roles.has(m)) roles.set(m, CY.materialRole(m.name, !!m.map));
+      if (m.map) textures.add(m.map);
+    });
+    // cabeza (rostro + cabello): para el casco de los bots
+    var head = new T.Box3();
+    root.updateMatrixWorld(true);
+    root.traverse(function (o) {
+      if (!o.isMesh) return;
+      var role = roles.get(o.material);
+      if (role === 'face' || role === 'hair') head.expandByObject(o);
+    });
+    var clip = gltf.animations && gltf.animations.length ? gltf.animations[0] : null;
+    return {
+      root: root, clip: clip, roles: roles, wheelR: wheelR > 0.05 ? wheelR : CY.WHEEL_RADIUS_M, wheels: wheels,
+      head: head.isEmpty() ? null : head,
+      geometries: Array.from(geos), textures: Array.from(textures), meshes: meshes, triangles: tris
+    };
+  }
+
+  /* ------------------------------------------------------------------ */
   /* Escena                                                              */
   /* ------------------------------------------------------------------ */
 
@@ -2119,9 +2197,11 @@
       foot: track(new T.BoxGeometry(0.22, 0.05, 0.09))
     };
     var kindMats = {};
-    function matsFor(kind) {
-      if (kindMats[kind]) return kindMats[kind];
-      var ghost = kind === 'ghost', col = KIND_COLORS[kind];
+    // team (solo bots, con modelo glTF disponible): el procedural lejano usa los colores del equipo
+    function matsFor(kind, team) {
+      var key = team ? kind + ':' + team.name : kind;
+      if (kindMats[key]) return kindMats[key];
+      var ghost = kind === 'ghost', col = team ? team.jersey : KIND_COLORS[kind];
       function mk(hex, emissive, metal) {
         var m = new T.MeshStandardMaterial({ color: lin(hex), roughness: metal ? 0.32 : 0.62, metalness: metal ? 0.55 : 0, envMap: metal ? envTex : null });
         if (ghost) {
@@ -2131,11 +2211,11 @@
         return track(m);
       }
       var halo = track(new T.MeshBasicMaterial({ color: lin(KIND_COLORS.ghost), transparent: true, opacity: 0.16, blending: T.AdditiveBlending, depthWrite: false, fog: false, toneMapped: false }));
-      kindMats[kind] = {
-        jersey: mk(col, true), helmet: mk(col, true), frame: mk(col, true, true),
-        shorts: mk(0x1c1f24, false), skin: mk(0xd9a37a, false), tire: mk(0x15171a, false), halo: halo
+      kindMats[key] = {
+        jersey: mk(col, true), helmet: mk(col, true), frame: mk(team ? team.frame : col, true, true),
+        shorts: mk(0x1c1f24, false), skin: mk(team ? team.skin : 0xd9a37a, false), tire: mk(0x15171a, false), halo: halo
       };
-      return kindMats[kind];
+      return kindMats[key];
     }
 
     var _v1 = new T.Vector3(), _yAxis = new T.Vector3(0, 1, 0), _m4 = new T.Matrix4();
@@ -2172,7 +2252,145 @@
       placeLeg(st.thighs[1], st.shins[1], st.feet[1], 0.11, st.phase + Math.PI);
     }
 
-    var riderList = [], riderById = {}, seenToken = 0, simTime = 0;
+    /* ---- ciclista glTF (modelo del usuario): se carga asincrono y reemplaza al procedural de cerca ---- */
+    var GHOST_MODEL = { color: 0xFFD23F, opacity: 0.45, emissive: 0.3 };
+    var HAIR_GREY = 0x5a5652;
+    var helmetGeo = null;
+    // casco de bot: casquete de elipsoide sobre la cabeza del modelo (cubre la frente lisa del rostro neutro)
+    function addBotHelmet(obj, team, cast) {
+      var hb = cyc.tpl.head;
+      if (!hb) return;
+      if (!helmetGeo) helmetGeo = track(new T.SphereGeometry(1, 20, 10, 0, Math.PI * 2, 0, Math.PI * 0.42));
+      var mats = cyc.botMats[team.name] || (cyc.botMats[team.name] = {});
+      if (!mats.helmet) mats.helmet = track(new T.MeshStandardMaterial({ color: lin(team.jersey), roughness: 0.35, metalness: 0.1 }));
+      var ry = 0.15, h = new T.Mesh(helmetGeo, mats.helmet);
+      h.name = 'casco';
+      h.castShadow = cast;
+      h.scale.set((hb.max.x - hb.min.x) / 2 * 1.2, ry, (hb.max.z - hb.min.z) / 2 * 1.15);
+      h.position.set((hb.min.x + hb.max.x) / 2, hb.max.y + 0.02 - ry, (hb.min.z + hb.max.z) / 2);
+      obj.add(h);
+    }
+    var cyc = { enabled: false, tpl: null, userMats: new Map(), ghostMat: null, botMats: {}, mixers: 0 };
+    var cycPromise = loadCyclistAsset();
+    if (cycPromise) {
+      cyc.enabled = true;
+      cycPromise.then(function (tpl) {
+        if (disposed || !tpl) return;
+        cyc.tpl = tpl;
+      });
+    }
+    function cycUserMat(orig) {
+      var m = cyc.userMats.get(orig);
+      if (!m) {
+        m = track(orig.clone());
+        if (m.metalness > 0.3 && envTex) m.envMap = envTex;
+        // el cabello exportado queda blanco puro (el color venia de nodos de Blender): gris entrecano de la vista de referencia
+        if (cyc.tpl.roles.get(orig) === 'hair' && !m.map && m.color.r > 0.95 && m.color.g > 0.95 && m.color.b > 0.95) m.color = lin(HAIR_GREY);
+        cyc.userMats.set(orig, m);
+      }
+      return m;
+    }
+    function cycGhostMat() {
+      if (!cyc.ghostMat) {
+        cyc.ghostMat = track(new T.MeshStandardMaterial({
+          color: lin(GHOST_MODEL.color), roughness: 0.5, metalness: 0, transparent: true, opacity: GHOST_MODEL.opacity,
+          depthWrite: false, emissive: lin(GHOST_MODEL.color), emissiveIntensity: GHOST_MODEL.emissive
+        }));
+      }
+      return cyc.ghostMat;
+    }
+    // bots: maillot, cuadro, cabello y piel del equipo; el rostro se cubre con piel lisa (nunca la foto del usuario)
+    function cycBotMat(orig, role, team) {
+      var mats = cyc.botMats[team.name] || (cyc.botMats[team.name] = {});
+      var hex = role === 'jersey' ? team.jersey : role === 'frame' ? team.frame : role === 'hair' ? team.hair : (role === 'skin' || role === 'face') ? team.skin : null;
+      if (hex == null) return cycUserMat(orig);
+      var key = role === 'face' ? 'skin' : role;
+      if (!mats[key]) {
+        var m = track(orig.clone());
+        m.map = null;
+        m.color = lin(hex);
+        if (m.metalness > 0.3 && envTex) m.envMap = envTex;
+        if (role === 'face') { m.roughness = 0.62; m.metalness = 0; }
+        m.needsUpdate = true;
+        mats[key] = m;
+      }
+      return mats[key];
+    }
+    function createModelInstance(st) {
+      var tpl = cyc.tpl, CY = R.cyclist;
+      var obj = tpl.root.clone(true);                     // comparte geometrias
+      var shadows = modelShadows(st);
+      obj.traverse(function (o) {
+        if (!o.isMesh) return;
+        var role = tpl.roles.get(o.material) || 'other';
+        if (st.kind === 'ghost') o.material = cycGhostMat();
+        else if (st.kind === 'bot') {
+          o.material = cycBotMat(o.material, role, st.team || CY.botTeam(-1, st.id));
+          if (role === 'lenses') o.visible = false;
+        } else o.material = cycUserMat(o.material);
+        o.castShadow = shadows.cast; o.receiveShadow = shadows.receive;
+      });
+      if (st.kind === 'bot') addBotHelmet(obj, st.team || CY.botTeam(-1, st.id), shadows.cast);
+      var holder = new T.Group();
+      holder.rotation.y = -Math.PI / 2;                   // modelo: avance -Z, derecha +X -> marco del ciclista: +x adelante, +z derecha
+      holder.add(obj);
+      st.root.add(holder);
+      var mixer = null, action = null;
+      if (tpl.clip) {
+        mixer = new T.AnimationMixer(obj);
+        action = mixer.clipAction(tpl.clip);
+        action.play();
+        action.time = Math.random() * tpl.clip.duration;  // cada ciclista en otra fase
+        cyc.mixers++;
+      }
+      st.model = {
+        holder: holder, obj: obj, mixer: mixer, action: action, cast: shadows.cast,
+        wheels: [obj.getObjectByName('__rueda_rear'), obj.getObjectByName('__rueda_front')].filter(Boolean)
+      };
+    }
+    function removeModelInstance(st) {
+      var md = st.model;
+      if (!md) return;
+      if (md.mixer) { md.mixer.stopAllAction(); md.mixer.uncacheRoot(md.obj); cyc.mixers--; }
+      st.root.remove(md.holder);
+      st.model = null;
+      st.lod = 'proc';
+      st.body.visible = true;
+    }
+    // sombras: el usuario proyecta y recibe; los bots proyectan solo en calidad alta; el fantasma, nada
+    function modelShadows(st) {
+      if (st.kind === 'user') return { cast: true, receive: true };
+      return { cast: st.kind === 'bot' && level === 'alta', receive: false };
+    }
+    var _camToRider = new T.Vector3();
+    function updateRiderModel(st, dt) {
+      var CY = R.cyclist;
+      if (!CY) return;
+      var d = cyc.tpl ? _camToRider.copy(st.root.position).sub(camera.position).length() : Infinity;
+      var want = CY.chooseLod({ distM: d, kind: st.kind, quality: level, prev: st.lod, modelReady: !!cyc.tpl });
+      if (want !== st.lod) {
+        if (want === 'model' && !st.model) createModelInstance(st);
+        if (st.model) st.model.holder.visible = want === 'model';
+        st.body.visible = want !== 'model';
+        st.lod = want;
+      }
+      if (st.lod !== 'model') return;
+      var md = st.model;
+      var cast = modelShadows(st).cast;
+      if (cast !== md.cast) {
+        md.cast = cast;
+        md.obj.traverse(function (o) { if (o.isMesh) o.castShadow = cast; });
+      }
+      if (md.action) {
+        var ts = CY.cadenceTimeScale(CY.riderCadence(st.kind, st.cadenceRpm, st.speed, st.id), st.speed);
+        if (ts > 0) { md.action.paused = false; md.action.timeScale = ts; } else md.action.paused = true;
+        md.mixer.update(dt);
+      }
+      var roll = CY.wheelOmega(st.speed, cyc.tpl.wheelR) * dt;
+      if (roll) for (var k = 0; k < md.wheels.length; k++) md.wheels[k].rotation.x -= roll;   // avance hacia -Z del modelo
+    }
+
+    var riderList = [], riderById = {}, seenToken = 0, simTime = 0, botSeq = 0;
     function normKind(k) { return KIND_COLORS[k] !== undefined ? k : 'bot'; }
 
     function makeLabelSprite(st) {
@@ -2205,14 +2423,16 @@
 
     function createRider(r) {
       var kind = normKind(r.kind);
-      var m = matsFor(kind);
+      var team = kind === 'bot' && R.cyclist ? R.cyclist.botTeam(botSeq++, r.id) : null;
+      var m = matsFor(kind, cyc.enabled ? team : null);
       var root = new T.Group();
       var body = new T.Group();
       root.add(body);
       var st = {
-        id: r.id, kind: kind, root: root, token: 0, distM: r.distM, lastD: r.distM, lastT: simTime, speed: 0,
+        id: r.id, kind: kind, root: root, body: body, team: team, token: 0, distM: r.distM, lastD: r.distM, lastT: simTime, speed: 0,
         phase: Math.random() * Math.PI * 2, tx: 0, ty: 0, tz: 0, tq: new T.Quaternion(), hx: 1, hz: 0, fresh: true,
-        wheels: [], thighs: [], shins: [], feet: [], labelText: null, label: null
+        wheels: [], thighs: [], shins: [], feet: [], labelText: null, label: null,
+        cadenceRpm: null, lod: 'proc', model: null
       };
       function part(g, mat) { var me = new T.Mesh(g, mat); me.castShadow = kind !== 'ghost'; body.add(me); return me; }
       var i, w;
@@ -2257,6 +2477,7 @@
     }
 
     function removeRider(st) {
+      removeModelInstance(st);
       scene.remove(st.root);
       st.labelTex.dispose(); st.labelMat.dispose();
       delete riderById[st.id];
@@ -2280,6 +2501,7 @@
         }
         st.token = token;
         st.distM = r.distM;
+        st.cadenceRpm = r.cadenceRpm != null && isFinite(r.cadenceRpm) ? +r.cadenceRpm : null;
         var text = r.label != null ? String(r.label) : (r.name != null ? String(r.name) : '');
         if (st.kind === 'ghost' && compactView()) text = 'PB';
         if (text !== st.labelText) drawLabel(st, text);
@@ -2459,12 +2681,23 @@
       for (i = 0; i < instMeshes.length; i++) n += instMeshes[i].count;
       return n;
     }
+    // ciclistas: estado del modelo glTF y cuantos se dibujan con el modelo / procedural
+    function cyclistStats() {
+      var nModel = 0, nProc = 0, i;
+      for (i = 0; i < riderList.length; i++) { if (riderList[i].lod === 'model') nModel++; else nProc++; }
+      return {
+        model: cyc.tpl ? 'listo' : (cyc.enabled ? 'cargando' : 'sin modelo'),
+        withModel: nModel, procedural: nProc, mixers: cyc.mixers,
+        meshesPerRider: cyc.tpl ? cyc.tpl.meshes : 0, trianglesPerRider: cyc.tpl ? Math.round(cyc.tpl.triangles) : 0
+      };
+    }
     function getStats() {
       var info = renderer.info.render;
       return {
         fps: Math.round(10 / monitor.avg()) / 10, drawCalls: info.calls, triangles: info.triangles,
         instances: instanceCount(), quality: level, mode: qualityMode,
-        hiTiles: hiTiles.size, vegChunks: vegLayer.map.size, grassChunks: grassLayer.map.size, landcover: lc.synthetic ? 'sintetica' : 'ruta'
+        hiTiles: hiTiles.size, vegChunks: vegLayer.map.size, grassChunks: grassLayer.map.size, landcover: lc.synthetic ? 'sintetica' : 'ruta',
+        cyclist: cyclistStats()
       };
     }
 
@@ -2496,7 +2729,8 @@
           p.x += ddx * kr; p.y += ddy * kr; p.z += ddz * kr;
           st.root.quaternion.slerp(st.tq, kr);
         }
-        if (st.speed > 0.05) {
+        if (cyc.enabled) updateRiderModel(st, dt);
+        if (st.speed > 0.05 && st.lod !== 'model') {
           var rev = clamp(st.speed / 8 * 1.4, 0, 2.2);              // rev/s de cadencia segun velocidad
           st.phase += rev * 2 * Math.PI * dt;
           if (st.phase > 62831) st.phase -= 62831;
@@ -2562,6 +2796,12 @@
       if (sun.shadow.map) { sun.shadow.map.dispose(); sun.shadow.map = null; }
       riderList.slice().forEach(removeRider);
       riderList.length = 0; riderById = {};
+      // modelo glTF: los materiales propios van en `own`; las geometrias y la textura compartidas liberan su copia en GPU
+      if (cyc.tpl) {
+        cyc.tpl.geometries.forEach(function (g) { g.dispose(); });
+        cyc.tpl.textures.forEach(function (t) { t.dispose(); });
+      }
+      cyc.userMats.clear(); cyc.botMats = {}; cyc.ghostMat = null; cyc.tpl = null;
       if (scene.clear) scene.clear();
       renderer.dispose();
       if (renderer.forceContextLoss) renderer.forceContextLoss();

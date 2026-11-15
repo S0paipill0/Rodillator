@@ -904,7 +904,11 @@
     }
     function sceneRiders() {
       const len = ride.route.distanceM;
-      return riderList().map((x) => ({ id: x.id, name: x.name, label: x.label, kind: x.kind, color: x.color, distM: ride.mode === 'route' ? x.distM : x.distM % len }));
+      // cadenceRpm: solo el usuario (cadencia del simulador o sensor); bots y fantasma la estima la escena
+      return riderList().map((x) => ({
+        id: x.id, name: x.name, label: x.label, kind: x.kind, color: x.color, distM: ride.mode === 'route' ? x.distM : x.distM % len,
+        cadenceRpm: x.kind === 'user' && ride.cad != null ? (ride.paused ? 0 : ride.cad) : undefined
+      }));
     }
 
     function currentTarget() {

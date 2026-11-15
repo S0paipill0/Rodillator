@@ -9,7 +9,7 @@ const { spawnSync } = require('node:child_process');
 const ROOT = path.join(__dirname, '..');
 const THREE = 'https://cdn.jsdelivr.net/npm/three@0.149.0/build/three.min.js';
 const CHART = 'https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js';
-const ORDER = ['store', 'training', 'physics', 'routes', 'riders', 'scene3d', 'devices', 'integrations', 'coach',
+const ORDER = ['store', 'training', 'physics', 'routes', 'riders', 'vendor/gltfloader', 'cyclist', 'scene3d', 'devices', 'integrations', 'coach',
   'ui/shell', 'ui/onboarding', 'ui/plan', 'ui/routes', 'ui/settings', 'ui/ride', 'ui/stats', 'app'];
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'rodillator-build-'));
@@ -19,7 +19,9 @@ function build(extra) {
   assert.equal(r.status, 0, r.stderr + r.stdout);
   return { html: fs.readFileSync(out, 'utf8'), stdout: r.stdout };
 }
-const { html, stdout } = build();
+// la suite no depende del modelo privado: se construye sin GLB (ruta inexistente)
+const NO_GLB = ['--cyclist', path.join(tmp, 'no-existe.glb')];
+const { html, stdout } = build(NO_GLB);
 
 test('reemplaza todos los marcadores y arma el head', () => {
   assert.doesNotMatch(html, /<!-- @(STYLES|ROUTES|SCRIPTS) -->/);
@@ -72,7 +74,7 @@ test('sin patrones prohibidos por el sandbox', () => {
 });
 
 test('--local-libs solo cambia las URLs de las librerías', () => {
-  const local = build(['--local-libs', '/tmp/libs-x']).html;
+  const local = build(['--local-libs', '/tmp/libs-x'].concat(NO_GLB)).html;
   assert.ok(local.includes('file:///tmp/libs-x/three.min.js'));
   assert.ok(local.includes('file:///tmp/libs-x/chart.umd.min.js'));
   assert.ok(!local.includes(THREE) && !local.includes(CHART));
@@ -84,4 +86,62 @@ test('safe_script escapa </script y <!-- en JS/JSON embebido', () => {
   const out = r.stdout.trim();
   assert.ok(!out.includes('<!--') && !/<\/script/i.test(out) && !/<\/style/i.test(out), out);
   assert.ok(out.includes('<\\!--'));
+});
+
+test('modelo del ciclista: sin GLB no embebe nada y avisa', () => {
+  assert.ok(!html.includes('window.R_CYCLIST_GLB="'));
+  assert.match(stdout, /AVISO: no se encontró el modelo del ciclista/);
+});
+
+test('modelo del ciclista: con GLB lo embebe en base64 antes de los módulos', () => {
+  const fake = Buffer.concat([Buffer.from('glTF'), Buffer.from([2, 0, 0, 0]), Buffer.from('cuerpo de prueba <script></script>')]);
+  const f = path.join(tmp, 'fake.glb');
+  fs.writeFileSync(f, fake);
+  const { html: h, stdout: out } = build(['--cyclist', f]);
+  const m = h.match(/<script>window\.R_CYCLIST_GLB="([A-Za-z0-9+/=]+)"<\/script>/);
+  assert.ok(m, 'script con el base64');
+  assert.deepEqual(Buffer.from(m[1], 'base64'), fake);
+  assert.ok(h.indexOf('window.R_CYCLIST_GLB="') < h.indexOf('/* @file src/store.js */'));
+  assert.ok(h.indexOf('window.R_CYCLIST_GLB="') > h.indexOf('window.R_ROUTES=[]'));
+  assert.match(out, /Modelo del ciclista: fake\.glb/);
+});
+
+test('modelo del ciclista: un archivo que no es GLB no se embebe', () => {
+  const f = path.join(tmp, 'malo.glb');
+  fs.writeFileSync(f, 'no soy un glb');
+  const { html: h } = build(['--cyclist', f]);
+  assert.ok(!h.includes('window.R_CYCLIST_GLB="'));
+});
+
+test('GLTFLoader portado: script clásico que registra THREE.GLTFLoader, con licencia MIT', () => {
+  const src = fs.readFileSync(path.join(ROOT, 'src', 'vendor', 'gltfloader.js'), 'utf8');
+  assert.match(src, /The MIT License/);
+  assert.doesNotMatch(src, /^\s*(import|export)\b/m);
+  assert.match(src, /THREE\.GLTFLoader = GLTFLoader;/);
+  vm.runInNewContext(src, { window: {} });            // sin THREE: no lanza ni registra nada
+  // THREE simulado: cualquier clase pedida existe; el script debe registrar GLTFLoader
+  const backing = {};
+  const THREE = new Proxy(backing, { get: (o, k) => (k in o ? o[k] : (k === 'GLTFLoader' ? undefined : class {})), set: (o, k, v) => { o[k] = v; return true; }, has: () => true });
+  vm.runInNewContext(src, { window: { THREE } });
+  assert.equal(typeof backing.GLTFLoader, 'function');
+});
+
+test('privacidad: ningún GLB ni asset privado está versionado', () => {
+  const r = spawnSync('git', ['ls-files'], { cwd: ROOT, encoding: 'utf8' });
+  if (r.status !== 0) return;                        // fuera de un repositorio git
+  const files = r.stdout.split('\n').filter(Boolean);
+  assert.deepEqual(files.filter((f) => /\.glb$/i.test(f)), []);
+  assert.deepEqual(files.filter((f) => /^assets\/private\//.test(f)), []);
+  assert.deepEqual(files.filter((f) => /\.(glb|gltf)$|cyclist\.opt/i.test(f)), []);
+  const ig = fs.readFileSync(path.join(ROOT, '.gitignore'), 'utf8');
+  assert.match(ig, /^assets\/private\/$/m);
+});
+
+test('privacidad: src/ no contiene el modelo embebido', () => {
+  const walk = (d) => fs.readdirSync(d, { withFileTypes: true }).flatMap((e) => e.isDirectory() ? walk(path.join(d, e.name)) : [path.join(d, e.name)]);
+  for (const f of walk(path.join(ROOT, 'src'))) {
+    const t = fs.readFileSync(f, 'utf8');
+    assert.ok(!/Z2xURg/.test(t), 'base64 de un GLB en ' + f);          // "glTF" en base64
+    assert.ok(!/R_CYCLIST_GLB\s*=\s*["']/.test(t), 'asignación del modelo en ' + f);
+  }
 });

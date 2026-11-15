@@ -1,0 +1,13 @@
+{
+  "name": "rodillator-cyclist-tools",
+  "private": true,
+  "type": "module",
+  "description": "Herramientas offline para optimizar el modelo glTF del ciclista (no es dependencia de runtime).",
+  "scripts": { "optimize": "node optimize_cyclist.mjs" },
+  "devDependencies": {
+    "@gltf-transform/core": "^4.1.0",
+    "@gltf-transform/functions": "^4.1.0",
+    "meshoptimizer": "^0.22.0",
+    "sharp": "^0.33.5"
+  }
+}
