@@ -9,7 +9,7 @@ import sys
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 SCRIPT_ORDER = [
-    'store', 'training', 'physics', 'routes', 'riders', 'scene3d', 'devices', 'integrations',
+    'store', 'training', 'physics', 'routes', 'riders', 'scene3d', 'devices', 'integrations', 'coach',
     'ui/shell', 'ui/onboarding', 'ui/plan', 'ui/routes', 'ui/settings', 'ui/ride', 'ui/stats', 'app',
 ]
 THREE_URL = 'https://cdn.jsdelivr.net/npm/three@0.149.0/build/three.min.js'

@@ -276,6 +276,8 @@
     plus: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 5h2v6h6v2h-6v6h-2v-6H5v-2h6z"/></svg>',
     camera: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 4l-1.8 2H4a2 2 0 00-2 2v10a2 2 0 002 2h16a2 2 0 002-2V8a2 2 0 00-2-2h-3.2L15 4zm3 4.5A4.5 4.5 0 1112 17.5 4.5 4.5 0 0112 8.5zm0 2A2.5 2.5 0 1014.5 13 2.5 2.5 0 0012 10.5z"/></svg>',
     stop: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6h12v12H6z"/></svg>',
+    spk: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 9v6h4l5 4V5L7 9zm13.5 3A4.5 4.5 0 0014 8v8a4.5 4.5 0 002.5-4zM14 3.2v2.1a7 7 0 010 13.4v2.1a9 9 0 000-17.6z"/></svg>',
+    spkOff: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 9v6h4l5 4V5L7 9zm12.6 3l2.7-2.7-1.4-1.4-2.7 2.7-2.7-2.7-1.4 1.4 2.7 2.7-2.7 2.7 1.4 1.4 2.7-2.7 2.7 2.7 1.4-1.4z"/></svg>',
   };
   function icon(name) { const s = h('span', { class: 'rd-ico' }); s.innerHTML = ICON[name]; return s; }
 
@@ -542,6 +544,7 @@
     let ride = null;        // estado de la rodada
     let scene = null;
     let sim = null;
+    let audio = null, coach = null, muted = false; // coach de voz (suena sobre la música, sin pausarla)
     let stage = null;       // referencias DOM del HUD
     let rafId = 0, hiddenIv = 0;
     let wakeLock = null;
@@ -588,6 +591,14 @@
       sim.setTargetPower(workout ? R.training.targetPowerAt(workout, 0, ftp).watts : ride.simTarget);
       cleanups.push(sim.on('data', onData));
       sim.start();
+
+      // coach: el audio se desbloquea aquí (clic en Comenzar) por la política de autoplay
+      if (audio) { try { audio.dispose(); } catch (e) { /* nada */ } }
+      const cs = R.coach.normalizeSettings(settings.coach);
+      audio = R.coach.createAudio({ volume: cs.volume, voice: cs.voice, beeps: cs.beeps });
+      audio.unlock();
+      muted = false;
+      coach = R.coach.createCoach({ say: (t, o) => audio.say(t, o), beep: (k) => audio.beep(k), now: () => performance.now(), verbosity: cs.verbosity });
 
       phase = 'countdown';
       buildStage();
@@ -687,13 +698,14 @@
       S.minusBtn = cbtn('minus', ride.workout ? 'Bajar intensidad 5 % (↓)' : 'Bajar 10 W (↓)', () => adjust(-1));
       S.plusBtn = cbtn('plus', ride.workout ? 'Subir intensidad 5 % (↑)' : 'Subir 10 W (↑)', () => adjust(1));
       S.camBtn = cbtn('camera', 'Cambiar cámara (C)', () => cycleCamera());
+      S.muteBtn = cbtn('spk', 'Silenciar coach (M)', () => toggleMute());
       S.endBtn = cbtn('stop', 'Terminar rodada', () => askFinish(), 'rd-ctl--end');
       S.adj = h('span', { class: 'rd-adj', text: '' });
       S.slider = ride.workout ? null : h('input', {
         type: 'range', class: 'rd-slider', min: '0', max: String(Math.round(ftp * 2)), step: '5', value: String(ride.simTarget),
         'aria-label': 'Potencia objetivo del simulador', oninput: (e) => { if (sim) sim.setTargetPower(Number(e.target.value)); },
       });
-      const controls = h('div', { class: 'rd-controls' }, [S.pauseBtn, S.minusBtn, S.plusBtn, S.adj, S.camBtn, S.endBtn, S.slider]);
+      const controls = h('div', { class: 'rd-controls' }, [S.pauseBtn, S.minusBtn, S.plusBtn, S.adj, S.camBtn, S.muteBtn, S.endBtn, S.slider]);
       S.paused = h('div', { class: 'rd-paused', hidden: true }, [h('b', { text: 'En pausa' }), h('span', { text: 'Espacio para seguir' })]);
       S.count = h('div', { class: 'rd-count', 'aria-live': 'assertive' });
       root.appendChild(h('div', { class: 'rd-hud' }, [
@@ -715,6 +727,7 @@
       if (disposed) return;
       const c = stage.count;
       c.classList.add('is-on');
+      if (coach) coach.event('start', { n });
       if (n <= 0) {
         c.textContent = '¡Rueda!';
         c.classList.add('go');
@@ -762,6 +775,7 @@
       dt = clamp(dt, 0, 1.5);
       if (!r.paused && phase === 'ride' && !r.finishing) advance(dt, nowMs);
       if (r.over) return;
+      if (r.paused && coach) coach.update({ paused: true });
       updateHud(nowMs);
       if (!document.hidden) {
         scene.setRiders(sceneRiders());
@@ -808,6 +822,15 @@
       // mensajes
       const step = tp ? { index: tp.stepIndex, label: tp.step.label || ('Paso ' + (tp.stepIndex + 1)), watts: Math.round(tp.step.powerPct * ftp / 100 * r.intensity), durationS: tp.step.durationS, isLast: tp.stepIndex === r.workout.steps.length - 1 } : null;
       const ev = r.detector.update({ tS: r.tS, distM: r.distM, step, ghostGapS: r.ghostGap });
+      if (coach) {
+        ev.forEach((e) => { if (e.key === 'ghost-pass') coach.event('ghostPassed'); else if (e.key === 'ghost-lost') coach.event('ghostOvertook'); });
+        coach.update({
+          mode: r.mode, tS: r.tS, paused: false, workout: r.workout, ftp, stepIndex: tp ? tp.stepIndex : null,
+          stepElapsedS: tp ? tp.stepElapsedS : 0, stepRemainingS: tp ? tp.stepRemainingS : 0, targetW: tp ? tp.watts : 0,
+          powerW: r.power, gradePct: r.grade, distM: r.distM, routeLenM: len, speedMps: r.v, intensity: r.intensity,
+          workoutRemainingS: r.workout ? r.workout.durationS - r.tS : 0,
+        });
+      }
       if (ev.length) showMessage(ev[ev.length - 1].text, ev[0].key.indexOf('ghost') === 0 ? (ev[0].key === 'ghost-pass' ? 'good' : 'bad') : '');
 
       if (reachedEnd) finishRide(true);
@@ -960,6 +983,17 @@
       stage.paused.hidden = !ride.paused;
       stage.pauseBtn.firstChild.innerHTML = ICON[ride.paused ? 'play' : 'pause'];
       stage.pauseBtn.setAttribute('aria-label', ride.paused ? 'Reanudar (Espacio)' : 'Pausar (Espacio)');
+      if (coach) coach.event(ride.paused ? 'pause' : 'resume');
+    }
+
+    function toggleMute() {
+      if (!audio || !stage) return;
+      muted = !muted;
+      const cs = R.coach.normalizeSettings(settings.coach);
+      audio.setEnabled({ voice: !muted && cs.voice, beeps: !muted && cs.beeps });
+      stage.muteBtn.firstChild.innerHTML = ICON[muted ? 'spkOff' : 'spk'];
+      stage.muteBtn.setAttribute('aria-label', muted ? 'Activar coach (M)' : 'Silenciar coach (M)');
+      stage.muteBtn.setAttribute('aria-pressed', muted ? 'true' : 'false');
     }
 
     function adjust(sign) {
@@ -1004,10 +1038,11 @@
       if (ride) ride.over = true;
     }
 
+    function disposeCoach() { if (audio) { try { audio.dispose(); } catch (e) { /* nada */ } } audio = null; coach = null; }
     function disposeScene() { if (scene) { try { scene.dispose(); } catch (e) { /* nada */ } scene = null; } }
 
     function discard() {
-      stopEverything(); disposeScene();
+      stopEverything(); disposeScene(); disposeCoach();
       ride = null; phase = 'prep';
       say('Rodada descartada.', 'info');
       renderPrep();
@@ -1035,6 +1070,7 @@
         workoutId: r.workout ? r.workout.id : null, samples, ftp, date: r.startedAt,
       });
       const completed = auto && ((r.mode === 'route' && r.distM >= r.route.distanceM - 1) || (r.workout && r.tS >= r.workout.durationS));
+      if (completed && coach) coach.event('end');
       const result = { activity, improved: false, deltaS: 0, ghostWon: null, completed: !!completed, route: r.route, mode: r.mode, hadGhost: !!r.ghost };
 
       // guardar
@@ -1241,6 +1277,7 @@
         e.preventDefault(); if (!e.repeat) adjust(e.key === 'ArrowUp' ? 1 : -1);
       }
       else if (e.key === 'c' || e.key === 'C') cycleCamera();
+      else if (e.key === 'm' || e.key === 'M') toggleMute();
       else if (e.key === 'Escape') askFinish();
     }
     document.addEventListener('keydown', onKey);
@@ -1257,6 +1294,7 @@
         disposed = true;
         stopEverything();
         disposeScene();
+        disposeCoach();
         timers.forEach((t) => clearTimeout(t)); timers.clear();
         cleanups.splice(0).forEach((fn) => { try { fn(); } catch (e) { /* nada */ } });
         if (root.parentNode) root.parentNode.removeChild(root);

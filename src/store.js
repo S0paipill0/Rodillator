@@ -14,7 +14,7 @@
       profile: null,
       plan: null,
       activities: [],
-      settings: { reminderTime: '19:00', reminderDays: [1, 3, 5], ghostBoost: 0, botsCount: 6, units: 'metric' },
+      settings: { reminderTime: '19:00', reminderDays: [1, 3, 5], ghostBoost: 0, botsCount: 6, units: 'metric', coach: { voice: true, beeps: true, volume: 0.9, verbosity: 'completo' } },
       bests: {}
     };
   }
@@ -41,6 +41,7 @@
       settings: Object.assign(d.settings, isObj(raw.settings) ? raw.settings : {}),
       bests: isObj(raw.bests) ? raw.bests : {}
     };
+    s.settings.coach = Object.assign({}, defaults().settings.coach, isObj(s.settings.coach) ? s.settings.coach : {});
     return s;
   }
 

@@ -28,7 +28,7 @@ test('sin localStorage funciona solo en memoria', () => {
   assert.deepEqual(st.activities, []);
   assert.deepEqual(st.bests, {});
   assert.equal(st.schemaVersion, 1);
-  assert.deepEqual(st.settings, { reminderTime: '19:00', reminderDays: [1, 3, 5], ghostBoost: 0, botsCount: 6, units: 'metric' });
+  assert.deepEqual(st.settings, { reminderTime: '19:00', reminderDays: [1, 3, 5], ghostBoost: 0, botsCount: 6, units: 'metric', coach: { voice: true, beeps: true, volume: 0.9, verbosity: 'completo' } });
   S.set({ profile: { name: 'Ana' } });
   S.flush();
   assert.equal(S.get().profile.name, 'Ana');
@@ -216,4 +216,14 @@ test('isPersistent: false sin localStorage o si la escritura falla, true si guar
   } finally {
     if (prev === undefined) delete globalThis.localStorage; else globalThis.localStorage = prev;
   }
+});
+
+test('settings.coach: estados guardados sin coach o con coach parcial se completan', () => {
+  S.reset();
+  const base = { schemaVersion: 1, settings: { botsCount: 2 } };
+  S.importJSON(JSON.stringify(base));
+  assert.deepEqual(S.get().settings.coach, { voice: true, beeps: true, volume: 0.9, verbosity: 'completo' });
+  S.importJSON(JSON.stringify({ schemaVersion: 1, settings: { coach: { volume: 0.4 } } }));
+  assert.deepEqual(S.get().settings.coach, { voice: true, beeps: true, volume: 0.4, verbosity: 'completo' });
+  assert.equal(S.get().settings.botsCount, 6);
 });
