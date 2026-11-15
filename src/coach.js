@@ -112,7 +112,10 @@
         if (before) {
           var up = step.powerPct - endPct(before);
           beep('go');
-          if (up > 0) speak('¡Vamos!', PRI.COUNT); else if (up < 0) speak('¡Recupera!', PRI.COUNT);
+          if (Math.abs(up) < 10) {
+            // cambio pequeño (p. ej. escalones del test de rampa): solo pitido y, en la rampa, el vatiaje
+            if (s.workout.id === 'ramp-test') speak('Siguiente escalón: ' + round5(step.powerPct * s.ftp / 100) + ' vatios', PRI.REST);
+          } else if (up > 0) speak('¡Vamos!', PRI.COUNT); else speak('¡Recupera!', PRI.COUNT);
         }
         var stand = isStanding(step), wasStand = isStanding(before);
         if (stand && !wasStand) speak('¡Arriba! De pie', PRI.POSTURE);

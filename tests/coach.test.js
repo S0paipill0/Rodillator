@@ -24,7 +24,7 @@ function rig(verbosity) {
 // Simula un workout a pasos de 0,1 s (10 updates por segundo)
 function playWorkout(r, steps, opts) {
   const o = opts || {};
-  const workout = { steps };
+  const workout = { id: o.id, steps };
   const total = steps.reduce((a, s) => a + s.durationS, 0);
   const to = Math.min(o.to == null ? total : o.to, total);
   for (let t10 = Math.round((o.from || 0) * 10); t10 <= to * 10; t10++) {
@@ -58,6 +58,21 @@ test('cuenta regresiva: Tres/Dos/Uno/¡Vamos! exactamente una vez con 10 updates
   assert.strictEqual(r.beeps().filter((b) => b === 'go').length, 1);
   // los tres números salen en prioridad máxima
   r.log.filter((e) => e[1] === 'Tres').forEach((e) => assert.strictEqual(e[2], C.PRIORITY.COUNT));
+});
+
+test('cambio < 10 % FTP: solo pitido go; en el test de rampa, "Siguiente escalón"', () => {
+  const steps = [st(60, 45), st(60, 51), st(60, 57)];
+  const r = rig();
+  playWorkout(r, steps, { id: 'otro', to: 121 });
+  assert.ok(!r.texts().some((x) => x === '¡Vamos!' || x === '¡Recupera!' || x.indexOf('Siguiente') === 0));
+  assert.strictEqual(r.beeps().filter((b) => b === 'go').length, 2);
+  const q = rig();
+  playWorkout(q, steps, { id: 'ramp-test', to: 121 });
+  assert.deepStrictEqual(q.texts().filter((x) => x.indexOf('Siguiente') === 0), ['Siguiente escalón: 130 vatios', 'Siguiente escalón: 145 vatios']);
+  q.log.filter((e) => e[1] && e[1].indexOf('Siguiente') === 0).forEach((e) => assert.strictEqual(e[2], C.PRIORITY.REST));
+  const e = rig('esencial');
+  playWorkout(e, steps, { id: 'ramp-test', to: 121 });
+  assert.ok(!e.texts().some((x) => x.indexOf('Siguiente') === 0));
 });
 
 test('paso más suave: ¡Recupera!', () => {

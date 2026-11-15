@@ -247,7 +247,7 @@
           rec(6 * M, 50)),
         [cool(10)]])),
     mk('sprints-neuromusculares', 'Sprints neuromusculares', 'anaerobico',
-      'Ocho sprints máximos de 10 segundos con recuperación completa de casi 4 minutos. Potencia pura y reclutamiento muscular, con cero fatiga acumulada. Sal sentado, con cadencia alta y a todo.',
+      'Ocho sprints máximos de 10 segundos con recuperación completa de casi 4 minutos. Potencia pura y reclutamiento muscular, con cero fatiga acumulada. Sal de pie, con cadencia alta y a todo.',
       flat([[warm(20, 45, 75)],
         intervals(8, (i, n) => st(10, 200, 'Sprint ' + i + '/' + n, { cadence: 120, position: 'pie' }), rec(230, 50, 'Recuperación completa')),
         [cool(10)]])),
