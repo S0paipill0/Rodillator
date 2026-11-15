@@ -53,6 +53,9 @@
   // ---------- bots ----------
   function createBots(opts) {
     const { count = 6, ftp, massKg, route, seed = 1 } = opts;
+    if (!(ftp > 0)) throw new Error('Se necesita un FTP válido para crear los bots');
+    if (!(massKg > 0)) throw new Error('Se necesita la masa (massKg) para crear los bots');
+    if (!route || !route.points) throw new Error('Se necesita una ruta para crear los bots');
     const physics = R.physics, routes = R.routes;
     const rand = rng(seed);
     const names = NAMES.slice();
@@ -72,15 +75,15 @@
         id: 'bot-' + (i + 1), name, label: name, kind: 'bot', color: BOT_COLOR, personality,
         distM: 0, speedMps: 0, powerW: 0,
         update(dt, tS) {
-          if (this.distM >= route.distanceM) { this.speedMps = 0; this.powerW = 0; return; }
-          const s = routes.sampleAt(route, this.distM);
+          if (bot.distM >= route.distanceM) { bot.speedMps = 0; bot.powerW = 0; return; }
+          const s = routes.sampleAt(route, bot.distM);
           const wave = Math.sin((2 * Math.PI * tS) / per1 + ph1) * 0.65 + Math.sin((2 * Math.PI * tS) / per2 + ph2) * 0.35;
           const climb = CLIMB_BONUS * Math.min(1, Math.max(0, s.gradePct / 3));
           const rel = Math.min(POWER_MAX, Math.max(POWER_MIN, base * (1 + cfg.vary * wave) * (1 + climb)));
-          this.powerW = rel * ftp;
-          const v = physics.step({ v: this.speedMps, powerW: this.powerW, gradePct: s.gradePct, massKg, altitudeM: s.ele, dt });
-          this.distM = Math.min(route.distanceM, this.distM + ((this.speedMps + v) / 2) * dt);
-          this.speedMps = v;
+          bot.powerW = rel * ftp;
+          const v = physics.step({ v: bot.speedMps, powerW: bot.powerW, gradePct: s.gradePct, massKg, altitudeM: s.ele, dt });
+          bot.distM = Math.min(route.distanceM, bot.distM + ((bot.speedMps + v) / 2) * dt);
+          bot.speedMps = v;
         },
       };
       bots.push(bot);
@@ -113,13 +116,22 @@
     route = route || (R.routes && R.routes.get(routeId));
     if (!activity || !activity.samples || activity.samples.length < 2 || !route) return unchanged;
     if (activity.routeId && activity.routeId !== routeId) return unchanged;
-    const end = activity.samples[activity.samples.length - 1];
-    if (end[5] < route.distanceM - 5) return unchanged; // no completó la ruta
-    const totalTimeS = end[0];
+    const smp = activity.samples;
+    const idx = smp.findIndex((x) => x[5] >= route.distanceM - 5);
+    if (idx < 0) return unchanged; // no completó la ruta
+    // tiempo en que se cruza distanceM (interpolado); lo que sigue (enfriamiento) se ignora
+    let totalTimeS = smp[idx][0];
+    if (idx > 0 && smp[idx][5] > smp[idx - 1][5] && smp[idx - 1][5] < route.distanceM && smp[idx][5] >= route.distanceM) {
+      const a = smp[idx - 1], b = smp[idx];
+      totalTimeS = a[0] + ((route.distanceM - a[5]) / (b[5] - a[5])) * (b[0] - a[0]);
+    }
+    const trimmed = smp.slice(0, idx + 1);
+    const last = trimmed[idx];
+    trimmed[idx] = [totalTimeS, last[1], last[2], last[3], last[4], Math.min(last[5], route.distanceM), last[6]];
     const prev = current[routeId];
     if (prev && prev.totalTimeS <= totalTimeS) return { bests: current, improved: false, deltaS: prev.totalTimeS - totalTimeS };
     const next = Object.assign({}, current);
-    next[routeId] = { activityId: activity.id, totalTimeS, splits: splitsFromSamples(activity.samples) };
+    next[routeId] = { activityId: activity.id, totalTimeS, splits: splitsFromSamples(trimmed) };
     return { bests: next, improved: true, deltaS: prev ? prev.totalTimeS - totalTimeS : 0 };
   }
 

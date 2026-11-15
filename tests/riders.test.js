@@ -79,3 +79,24 @@ test('ranking ordena y calcula brecha', () => {
   assert.strictEqual(rk[0].gapS, 0);
   assert.ok(Math.abs(rk[1].gapS - 20) < 1e-9 && Math.abs(rk[2].gapS - 20) < 1e-9);
 });
+
+test('updateBest ignora el enfriamiento posterior a la meta e interpola el cruce', () => {
+  const len = route.distanceM;
+  const v = 7, tFin = len / v; // cruza entre muestras
+  const s = [];
+  for (let t = 0; t <= Math.ceil(tFin) + 300; t++) s.push([t, 200, null, null, v, Math.min(t * v, len + 3 * 20 + (t - Math.ceil(tFin)) * 1), 0]);
+  const act = { id: 'cool', routeId: 't1', samples: s };
+  const r = R.riders.updateBest({}, 't1', act);
+  assert.ok(r.improved);
+  assert.ok(Math.abs(r.bests.t1.totalTimeS - tFin) < 1.5, `${r.bests.t1.totalTimeS} vs ${tFin}`);
+  const sp = r.bests.t1.splits;
+  assert.ok(sp[sp.length - 1][0] <= len + 1e-6 && sp[sp.length - 1][1] < tFin + 1.5);
+});
+test('createBots valida ftp, masa y ruta; update no depende de this', () => {
+  assert.throws(() => R.riders.createBots({ massKg: 80, route }), /FTP/);
+  assert.throws(() => R.riders.createBots({ ftp: 200, route }), /masa/);
+  const b = R.riders.createBots({ count: 1, ftp: 200, massKg: 80, route, seed: 1 })[0];
+  const { update } = b;
+  update(1, 0); update(1, 1);
+  assert.ok(b.distM > 0);
+});

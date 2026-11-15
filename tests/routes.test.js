@@ -114,3 +114,20 @@ test('proceduralTerrain: forma, determinismo, sigue la elevación cerca del cami
   const ele = t.minEle + (q / 65535) * (t.maxEle - t.minEle);
   assert.ok(Math.abs(ele - 600) < 60, ele);
 });
+
+test('GPX con trk y rte no duplica; nombre prefiere trk, CDATA y entidades', () => {
+  const g = `<gpx><metadata><name>Meta</name></metadata><rte><name>R</name><rtept lat="1" lon="1"/><rtept lat="1.01" lon="1"/></rte>
+<trk><name><![CDATA[Cerro &amp; San Cristóbal]]></name><trkseg><trkpt lat="1" lon="1"/><trkpt lat="1.01" lon="1"/></trkseg></trk></gpx>`;
+  const r = RT.fromGPX(g, {});
+  assert.ok(r.distanceM > 1100 && r.distanceM < 1130, r.distanceM);
+  assert.strictEqual(r.name, 'Cerro & San Cristóbal');
+  const g2 = `<gpx><metadata><name>Meta &lt;1&gt;</name></metadata><trk><trkseg><trkpt lat="1" lon="1"/><trkpt lat="1.01" lon="1"/></trkseg></trk></gpx>`;
+  assert.strictEqual(RT.fromGPX(g2, {}).name, 'Meta <1>');
+});
+test('id duplicado en el registro recibe sufijo', () => {
+  const g = `<gpx><trk><name>Dup</name><trkseg><trkpt lat="1" lon="1"/><trkpt lat="1.01" lon="1"/></trkseg></trk></gpx>`;
+  const a = RT.register(RT.fromGPX(g, {}));
+  const b = RT.register(RT.fromGPX(g, {}));
+  const c = RT.register(RT.fromGPX(g, {}));
+  assert.deepStrictEqual([a.id, b.id, c.id], ['gpx-dup', 'gpx-dup-2', 'gpx-dup-3']);
+});

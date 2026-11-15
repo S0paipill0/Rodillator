@@ -54,3 +54,15 @@ test('kcalFromWork', () => {
   assert.ok(Math.abs(P.kcalFromWork(1000) - 996) < 5);
   assert.strictEqual(P.kcalFromWork(0), 0);
 });
+
+test('step: dt inválido no rompe; 65 W al 20 % no se estanca y equivale a speedFromPower', () => {
+  for (const dt of [NaN, -1, 0, Infinity, undefined]) assert.strictEqual(P.step({ v: 5, powerW: 200, gradePct: 0, massKg: 78, altitudeM: 0, dt }), 5);
+  assert.ok(Number.isFinite(P.step({ v: 5, powerW: 200, gradePct: 0, massKg: 78, altitudeM: 0, dt: 1e6 })));
+  const ss = P.speedFromPower({ powerW: 65, gradePct: 20, massKg: 78 });
+  assert.ok(ss > 0.3 && ss < 0.6, ss);
+  for (const dt of [0.05, 1]) {
+    let v = 0;
+    for (let i = 0; i < 600 / dt; i++) v = P.step({ v, powerW: 65, gradePct: 20, massKg: 78, altitudeM: 0, dt });
+    assert.ok(Math.abs(v - ss) / ss < 0.02, `dt ${dt}: ${v} vs ${ss}`);
+  }
+});

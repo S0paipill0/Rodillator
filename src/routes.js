@@ -46,13 +46,40 @@
         const e = /<ele>\s*([^<\s]+)\s*<\/ele>/.exec(m[3]);
         if (e && isFinite(parseFloat(e[1]))) ele = parseFloat(e[1]);
       }
-      pts.push({ lat, lon, ele });
+      pts.push({ lat, lon, ele, tag: m[1] });
     }
-    return pts;
+    // trkpt si existen; rtept solo como alternativa (evita duplicar rutas con <trk> y <rte>)
+    const trk = pts.filter((p) => p.tag === 'trkpt');
+    return trk.length ? trk : pts;
   }
 
   function slugify(s) {
     return String(s).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'ruta';
+  }
+
+  function decodeText(s) {
+    return String(s).replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1')
+      .replace(/&(lt|gt|amp|quot|apos|#\d+|#x[0-9a-fA-F]+);/g, (m, e) => {
+        if (e === 'lt') return '<'; if (e === 'gt') return '>'; if (e === 'amp') return '&';
+        if (e === 'quot') return '"'; if (e === 'apos') return "'";
+        const c = e[1] === 'x' ? parseInt(e.slice(2), 16) : parseInt(e.slice(1), 10);
+        try { return String.fromCodePoint(c); } catch (_) { return m; }
+      }).trim();
+  }
+  function gpxName(text) {
+    const nameIn = (chunk) => { const m = /<name>([\s\S]*?)<\/name>/.exec(chunk || ''); return m ? decodeText(m[1]) : ''; };
+    let n = '';
+    const trk = /<trk\b[^>]*>([\s\S]*?)(?:<trkseg|<trkpt|<\/trk>)/.exec(text);
+    if (trk) n = nameIn(trk[1]);
+    if (!n) { const rte = /<rte\b[^>]*>([\s\S]*?)(?:<rtept|<\/rte>)/.exec(text); if (rte) n = nameIn(rte[1]); }
+    if (!n) { const md = /<metadata\b[^>]*>([\s\S]*?)<\/metadata>/.exec(text); if (md) n = nameIn(md[1]); }
+    return n;
+  }
+  function uniqueId(id) {
+    if (!registry[id]) return id;
+    let k = 2;
+    while (registry[id + '-' + k]) k++;
+    return id + '-' + k;
   }
 
   function fromGPX(text, opts) {
@@ -104,9 +131,9 @@
       mn = Math.min(mn, e); mx = Math.max(mx, e);
     });
     const points = out.map((p, i) => [p.lat, p.lon, sm[i], p.d]);
-    const name = opts.name || (/<name>\s*([^<]+?)\s*<\/name>/.exec(text) || [])[1] || 'Ruta GPX';
+    const name = opts.name || gpxName(String(text)) || 'Ruta GPX';
     const route = {
-      id: opts.id || 'gpx-' + slugify(name),
+      id: uniqueId(opts.id || 'gpx-' + slugify(name)),
       name,
       region: '', country: '',
       description: hasEle ? 'Ruta importada desde un archivo GPX.' : 'Ruta importada desde un archivo GPX sin datos de elevación (terreno plano).',

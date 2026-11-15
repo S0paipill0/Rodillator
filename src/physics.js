@@ -5,7 +5,7 @@
   const RHO0 = 1.225;
   const DRIVETRAIN_EFF = 0.976;
   const WHEEL_INERTIA_KG = 1.4; // masa equivalente de la inercia de las ruedas
-  const MAX_DRIVE_FORCE_N = 1000;
+  const MAX_SUBSTEPS = 200;
 
   function airDensity(altitudeM) {
     return RHO0 * Math.exp(-(altitudeM || 0) / 8500);
@@ -41,20 +41,23 @@
     return Math.max(0, (lo + hi) / 2);
   }
 
+  // Integra la energía cinética E = m v²/2 con dE/dt = P_rueda − v·F_res(v).
+  // Es estable a baja velocidad (sin piso de velocidad) y tiene el mismo equilibrio que speedFromPower.
   function step(opts) {
     const { v, powerW, gradePct, massKg, altitudeM = 0, dt, windMps = 0, cda = 0.32, crr = 0.004 } = opts;
+    let vel = Math.max(0, Number.isFinite(v) ? v : 0);
+    if (!Number.isFinite(dt) || dt <= 0) return vel;
     const m = massKg + WHEEL_INERTIA_KG;
     const rho = airDensity(altitudeM);
     const pe = Math.max(0, powerW || 0) * DRIVETRAIN_EFF;
-    let vel = Math.max(0, v || 0);
-    const n = Math.max(1, Math.ceil(dt / 0.05));
+    const n = Math.min(MAX_SUBSTEPS, Math.max(1, Math.ceil(dt / 0.05)));
     const h = dt / n;
+    let e = 0.5 * m * vel * vel;
     for (let i = 0; i < n; i++) {
-      const drive = Math.min(MAX_DRIVE_FORCE_N, pe / Math.max(vel, 0.5));
-      const net = drive - resistiveForce(vel, gradePct || 0, massKg, rho, cda, crr, windMps);
-      vel = Math.max(0, vel + (net / m) * h); // en rodillo no se retrocede
+      vel = Math.sqrt((2 * e) / m);
+      e = Math.max(0, e + (pe - vel * resistiveForce(vel, gradePct || 0, massKg, rho, cda, crr, windMps)) * h);
     }
-    return vel;
+    return Math.sqrt((2 * e) / m);
   }
 
   function powerForSpeed(opts) {
