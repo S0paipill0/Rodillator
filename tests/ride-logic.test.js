@@ -210,3 +210,10 @@ test('CAMERAS tiene etiqueta corta para el botón del HUD', () => {
   const L = globalThis.R.rideLogic;
   L.CAMERAS.forEach((c) => assert.ok(c.short && c.short.length <= 8));
 });
+
+test('createDoubleTap.reset descarta el toque pendiente (multitoque)', () => {
+  const d = globalThis.R.rideLogic.createDoubleTap(300, 30);
+  d.tap(1000, 10, 10);
+  d.reset();
+  assert.equal(d.tap(1100, 10, 10), false);
+});

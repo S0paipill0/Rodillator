@@ -22,7 +22,7 @@
   var CLUSTER_M = 2.5;              // m: ciclistas mas cerca que esto se reparten en el carril
   var KIND_COLORS = { user: 0xFF5A1F, ghost: 0xFFD23F, bot: 0x7FA7C9 };
   var CAMERA_MODES = ['persecucion', 'aerea', 'lateral'];
-  var BASE_FOV = 58, PORTRAIT_FOV = 70, PORTRAIT_ASPECT = 0.8;
+  var BASE_FOV = 58, PORTRAIT_FOV = 70, PORTRAIT_ASPECT = 0.8, COMPACT_MAX_H = 500;
 
   // Desplazamiento (x, y) para camera.setViewOffset(w, h, x, y, w, h) que lleva el centro optico
   // al centro de la zona libre {top, bottom, left, right} (px CSS).
@@ -721,6 +721,7 @@
         st.token = token;
         st.distM = r.distM;
         var text = r.label != null ? String(r.label) : (r.name != null ? String(r.name) : '');
+        if (st.kind === 'ghost' && compactView()) text = 'PB';
         if (text !== st.labelText) drawLabel(st, text);
       }
       for (i = riderList.length - 1; i >= 0; i--) {
@@ -782,7 +783,7 @@
       } else if (cameraMode === 'lateral') {
         wantPos.set(px - hz * 9, py + 1.9, pz + hx * 9);           // 9 m a la derecha del rumbo
         wantLook.set(px + hx * 2, py + 1, pz + hz * 2);
-      } else if (camera.aspect < PORTRAIT_ASPECT) {
+      } else if (compactView()) {
         // vertical (celular): mas atras y mas alto, y mira casi al ciclista para que quede en el centro de la zona libre
         wantPos.set(px - hx * 15, py + 6.5, pz - hz * 15);
         pathAt(path, d + 6, _ahead);
@@ -812,9 +813,11 @@
     /* ---- tamano, calidad automatica ---- */
     var viewInsets = { top: 0, bottom: 0, left: 0, right: 0 };
     var viewW = 640, viewH = 360;
+    // Vista compacta (celular vertical u horizontal bajo): mismo criterio para camara, FOV y etiquetas.
+    function compactView() { return viewW / viewH < PORTRAIT_ASPECT || viewH <= COMPACT_MAX_H; }
     function applyProjection() {
       camera.aspect = viewW / viewH;
-      camera.fov = camera.aspect < PORTRAIT_ASPECT ? PORTRAIT_FOV : BASE_FOV;
+      camera.fov = compactView() ? PORTRAIT_FOV : BASE_FOV;
       var o = viewOffsetFor(viewW, viewH, viewInsets);
       if (o.x !== 0 || o.y !== 0) camera.setViewOffset(viewW, viewH, o.x, o.y, viewW, viewH);
       else camera.clearViewOffset();
@@ -863,7 +866,7 @@
       var kr = 1 - Math.exp(-dt * 18), i, st;
       var cx = camera.position.x, cy = camera.position.y, cz = camera.position.z;
       // vertical (celular): se evita el amontonamiento de etiquetas sobre el ciclista del usuario
-      var portrait = camera.aspect < PORTRAIT_ASPECT || viewH <= 500, uSt = userState(), nearBot = null, nearBotD = 1e9;
+      var portrait = compactView(), uSt = userState(), nearBot = null, nearBotD = 1e9;
       if (portrait && uSt) {
         for (i = 0; i < riderList.length; i++) {
           st = riderList[i];
@@ -894,12 +897,14 @@
         if (s < 1) s = 1;
         st.label.scale.set(st.labelW * s, st.labelW * s / 4, 1);
         st.label.position.y = 2.4 + 0.6 * (s - 1);
+        var vis = true;
         if (portrait && uSt && st !== uSt) {
-          // el fantasma/bots por detras del usuario quedan entre la camara y el: su etiqueta lo taparia
-          var behind = st.distM < uSt.distM + 2;
-          st.label.visible = st.kind === 'bot' ? st === nearBot : !behind;
-          if (st.label.visible) st.label.scale.multiplyScalar(0.7);
-        } else st.label.visible = true;
+          // vista compacta: solo el bot mas cercano por delante lleva etiqueta; el fantasma, un "PB" minimo
+          // el "PB" se oculta si el fantasma va pegado por detras: su etiqueta caeria sobre el ciclista
+          vis = st.kind === 'bot' ? st === nearBot : !(uSt.distM - st.distM >= 0 && uSt.distM - st.distM < 15);
+          if (vis) st.label.scale.multiplyScalar(st.kind === 'ghost' ? 0.55 : 0.7);
+        }
+        if (st.label.visible !== vis) st.label.visible = vis;
       }
       if (kindMats.ghost) kindMats.ghost.halo.opacity = 0.16 + 0.07 * Math.sin(simTime * 3);
 
