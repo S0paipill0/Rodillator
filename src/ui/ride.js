@@ -78,15 +78,33 @@
   // snap = { powerW, hr, cadence, speedMps, distM, eleM }
   function createSampler() {
     const samples = [];
-    let next = 0, lastDist = 0;
+    let next = 0, lastDist = 0, lastT = -1;
     return {
       samples,
+      // Fuerza una muestra final con el tiempo real y la distancia exacta (p. ej. la meta).
+      flush(tS, snap) {
+        const row = [
+          Math.round(tS * 100) / 100,
+          Math.max(0, Math.round(snap.powerW || 0)),
+          snap.hr != null ? Math.round(snap.hr) : null,
+          snap.cadence != null ? Math.round(snap.cadence) : null,
+          Math.round((snap.speedMps || 0) * 100) / 100,
+          Math.round(snap.distM * 10) / 10,
+          snap.eleM != null ? Math.round(snap.eleM * 10) / 10 : null,
+        ];
+        if (samples.length && row[0] <= lastT) {
+          const last = samples[samples.length - 1];
+          last[5] = Math.max(last[5], row[5]); // mismo instante: solo corrige la distancia
+        } else { samples.push(row); lastT = row[0]; }
+        lastDist = snap.distM;
+      },
       advance(tS, snap) {
         const pending = Math.floor(tS) - next + 1;
         if (pending <= 0) return 0;
         const d0 = lastDist, d1 = snap.distM;
         for (let k = 1; k <= pending; k++) {
           const dist = pending === 1 ? d1 : d0 + ((d1 - d0) * k) / pending;
+          lastT = next;
           samples.push([
             next,
             Math.max(0, Math.round(snap.powerW || 0)),
@@ -473,7 +491,7 @@
             routes.map((r) => h('option', { value: r.id, selected: r.id === cfg.routeId, text: r.name + ' · ' + L.fmtKm(r.distanceM) + ' km' }))),
           h('p', { class: 'rd-note', text: cfg.tab === 'workout'
             ? 'Recorres el paisaje con la velocidad que da tu potencia en la pendiente real. La pendiente no se envía al rodillo: manda el entrenamiento. ' + LOOP_MSG
-            : 'Sin meta: rueda el tiempo que quieras. Si llevas rodillo inteligente, sentirás la pendiente de la ruta. ' + LOOP_MSG }),
+            : 'Sin meta: rueda el tiempo que quieras. ' + LOOP_MSG }),
         ]));
       }
 
@@ -578,7 +596,8 @@
     }
 
     function onData(d) {
-      if (ride) ride.latest = d;
+      // en pausa y en la cuenta regresiva la lectura queda congelada
+      if (ride && phase === 'ride' && !ride.paused) ride.latest = d;
     }
 
     function requestWake() {
@@ -745,7 +764,7 @@
       updateHud(nowMs);
       if (!document.hidden) {
         scene.setRiders(sceneRiders());
-        scene.render(dt || 0.016);
+        scene.render(Math.min(dt || 0.016, 0.1));
       }
     }
 
@@ -958,9 +977,11 @@
       if (!scene.isFallback) say('Cámara: ' + L.CAMERAS[ride.camIdx].label, 'info');
     }
 
+    const askState = { wasPaused: false };
     function askFinish() {
       if (!ride || phase !== 'ride' || ride.finishing) return;
       const wasPaused = ride.paused;
+      askState.wasPaused = wasPaused;
       togglePause(true);
       dialog({
         title: '¿Terminar la rodada?',
@@ -999,6 +1020,7 @@
       ride.finishing = true;
       closeDialog();
       const r = ride;
+      r.sampler.flush(r.tS, { powerW: r.power, hr: r.hr, cadence: r.cad, speedMps: r.v, distM: r.distM, eleM: r.ele });
       const samples = r.sampler.samples.slice();
       stopEverything(); disposeScene();
       if (samples.length < 10) {
@@ -1047,7 +1069,7 @@
         a.rpe = n;
         if (n != null) {
           const st = store.get();
-          store.set({ activities: st.activities.map((x) => (x.id === a.id ? Object.assign({}, x, { rpe: n }) : x)) });
+          store.set({ activities: (st.activities || []).map((x) => (x.id === a.id ? Object.assign({}, x, { rpe: n }) : x)) });
           applyPlan();
         }
         showSummary(result);
@@ -1184,7 +1206,8 @@
             h('ol', { class: 'rd-steps' }, [
               h('li', { text: 'Pulsa "Copiar archivo" y pégalo en un editor de texto.' }),
               h('li', { text: 'Guárdalo como ' + filename + '.' }),
-              h('li', {}, ['Entra a ', h('a', { href: R.integrations.stravaUploadUrl, target: '_blank', rel: 'noopener noreferrer', text: 'strava.com/upload' }), ' y selecciona el archivo.']),
+              h('li', {}, ['Entra a ', h('a', { href: R.integrations.stravaUploadUrl, target: '_blank', rel: 'noopener noreferrer', text: 'strava.com/upload' }), ' y selecciona el archivo. Si el enlace no abre, copia esta dirección en tu navegador:',
+                h('input', { class: 'rd-input rd-url', type: 'text', readonly: true, value: R.integrations.stravaUploadUrl, 'aria-label': 'Dirección de Strava', onfocus: (e) => e.target.select() })]),
               h('li', { text: 'Sugerencia de nombre: ' + R.integrations.stravaActivityName(a) }),
             ]),
           ]),
@@ -1204,10 +1227,19 @@
     // ---------- teclado ----------
     function onKey(e) {
       if (disposed || phase !== 'ride' || e.ctrlKey || e.metaKey || e.altKey) return;
-      if (dialogEl) { if (e.key === 'Escape') { closeDialog(); if (ride && ride.paused) togglePause(false); } return; }
-      if (e.key === ' ' || e.code === 'Space') { e.preventDefault(); togglePause(); }
-      else if (e.key === 'ArrowUp') { e.preventDefault(); adjust(1); }
-      else if (e.key === 'ArrowDown') { e.preventDefault(); adjust(-1); }
+      if (dialogEl) {
+        if (e.key === 'Escape') { closeDialog(); if (ride && !askState.wasPaused) togglePause(false); }
+        return;
+      }
+      const tag = e.target && e.target.tagName;
+      const onControl = tag === 'BUTTON' || tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA';
+      if (e.key === ' ' || e.code === 'Space') {
+        if (onControl) return; // el control enfocado maneja su propia tecla: evita pausar y reanudar a la vez
+        e.preventDefault(); if (!e.repeat) togglePause();
+      } else if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+        if (tag === 'INPUT' || tag === 'SELECT') return; // el deslizador usa las flechas
+        e.preventDefault(); if (!e.repeat) adjust(e.key === 'ArrowUp' ? 1 : -1);
+      }
       else if (e.key === 'c' || e.key === 'C') cycleCamera();
       else if (e.key === 'Escape') askFinish();
     }

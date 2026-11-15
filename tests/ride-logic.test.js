@@ -132,3 +132,37 @@ test('escala RPE 1-10 descriptiva', () => {
   assert.strictEqual(L.RPE_SCALE.length, 10);
   L.RPE_SCALE.forEach((x, i) => { assert.strictEqual(x.n, i + 1); assert.ok(x.label && x.desc); });
 });
+
+test('flush: cruzar la meta a mitad de segundo registra la mejor marca', () => {
+  const route = { id: 'meta-test', distanceM: 1010, points: [[0, 0, 0, 0], [0, 0, 0, 1010]] };
+  const make = (withFlush) => {
+    const s = L.createSampler();
+    let t = 0, dist = 0;
+    const dt = 1 / 60;
+    while (dist < route.distanceM) { // 20 m/s: cruza la meta en t = 50,5 s
+      t += dt; dist = Math.min(route.distanceM, t * 20);
+      s.advance(t, { powerW: 300, speedMps: 20, distM: dist });
+    }
+    if (withFlush) s.flush(t, { powerW: 300, speedMps: 20, distM: dist });
+    return { s, t };
+  };
+  const mk = (s) => L.buildActivity({ id: 'a1', type: 'route', name: 'M', routeId: route.id, samples: s.samples, ftp: 250 });
+  const sin = make(false);
+  assert.strictEqual(R.riders.updateBest({}, route.id, mk(sin.s), route).improved, false, 'sin flush no llega a distanceM-5');
+  const con = make(true);
+  const res = R.riders.updateBest({}, route.id, mk(con.s), route);
+  assert.strictEqual(res.improved, true);
+  assert.ok(Math.abs(res.bests[route.id].totalTimeS - 50.5) < 0.1, String(res.bests[route.id].totalTimeS));
+  const last = con.s.samples[con.s.samples.length - 1];
+  assert.strictEqual(last[5], 1010);
+  assert.ok(last[0] > con.s.samples[con.s.samples.length - 2][0]);
+});
+
+test('flush en un segundo entero solo corrige la distancia', () => {
+  const s = L.createSampler();
+  s.advance(0, { powerW: 1, distM: 0 });
+  s.advance(1, { powerW: 1, distM: 5 });
+  s.flush(1, { powerW: 1, distM: 5.4 });
+  assert.strictEqual(s.samples.length, 2);
+  assert.strictEqual(s.samples[1][5], 5.4);
+});
