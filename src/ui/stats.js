@@ -1149,7 +1149,7 @@
     try { tcx = R.integrations.toTCX(a, S.D.profile); } catch (e) { toast('No se pudo generar el archivo TCX', 'error'); return; }
     var fname = 'rodillator-' + L.localDate(a.date) + '.tcx';
     Promise.resolve(R.integrations.saveFile({ filename: fname, data: tcx, mime: 'application/vnd.garmin.tcx+xml' })).then(function (res) {
-      if (res && res.ok) { toast('Archivo TCX guardado', 'success'); return; }
+      if (res && res.ok) { toast('Archivo TCX guardado', 'ok'); return; }
       var data = res && res.data ? res.data : tcx;
       var done = function () { toast('Tu navegador no permite descargas aquí: copiamos el TCX al portapapeles.', 'info'); };
       if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(data).then(done, function () { showCopy(data, fname); });
@@ -1192,7 +1192,7 @@
       patch.bests = nb;
     }
     R.store.set(patch);
-    toast('Rodada borrada', 'success');
+    toast('Rodada borrada', 'ok');
   }
 
   // ---------- registro de la vista ----------

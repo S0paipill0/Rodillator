@@ -201,3 +201,19 @@ test('pushDb: sube sin samples las actividades de más de 14 días', async () =>
   assert.equal(nw.samples.length, 100);
   assert.equal(S.get().activities[0].samples.length, 100);
 });
+
+test('isPersistent: false sin localStorage o si la escritura falla, true si guarda', () => {
+  S.reset();
+  assert.equal(S.isPersistent(), false, 'sin localStorage');
+  const prev = globalThis.localStorage;
+  try {
+    globalThis.localStorage = fakeStorage();
+    S.set({ settings: { botsCount: 3 } }); S.flush();
+    assert.equal(S.isPersistent(), true);
+    globalThis.localStorage = fakeStorage({ maxLen: 1 });
+    S.set({ settings: { botsCount: 4 } }); S.flush();
+    assert.equal(S.isPersistent(), false, 'escritura rechazada');
+  } finally {
+    if (prev === undefined) delete globalThis.localStorage; else globalThis.localStorage = prev;
+  }
+});

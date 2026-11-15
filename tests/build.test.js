@@ -77,3 +77,11 @@ test('--local-libs solo cambia las URLs de las librerías', () => {
   assert.ok(local.includes('file:///tmp/libs-x/chart.umd.min.js'));
   assert.ok(!local.includes(THREE) && !local.includes(CHART));
 });
+
+test('safe_script escapa </script y <!-- en JS/JSON embebido', () => {
+  const r = spawnSync('python3', ['-c', "import build; print(build.safe_script('a</script>b<!--c</STYLE>'))"], { cwd: ROOT, encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stderr);
+  const out = r.stdout.trim();
+  assert.ok(!out.includes('<!--') && !/<\/script/i.test(out) && !/<\/style/i.test(out), out);
+  assert.ok(out.includes('<\\!--'));
+});

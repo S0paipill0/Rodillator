@@ -19,7 +19,7 @@
     saved.forEach(function (r) {
       try {
         var route = Object.assign({}, r);
-        if (!route.terrain) route.terrain = R.routes.proceduralTerrain(route);
+        route.terrain = R.routes.proceduralTerrain(route); // siempre se regenera: el almacenado puede estar obsoleto
         R.routes.register(route);
         n++;
       } catch (e) { /* una ruta guardada dañada no bloquea el arranque */ }

@@ -17,20 +17,11 @@
     var st = R.store.get();
     if (!st.plan || !st.profile) return;
     var today = R.ui.util.todayStr();
-    var adapted;
-    try { adapted = R.training.adaptPlan(st.plan, st.activities || [], st.profile, { today: today }); }
+    var res;
+    try { res = R.training.adaptPlanOnce(st.plan, st.activities || [], st.profile, { today: today }); }
     catch (e) { return; }
-    var prev = st.plan.lastAdaptation;
-    if (prev && prev.date === today) {
-      var byDate = {};
-      st.plan.weeks.forEach(function (w) { w.days.forEach(function (d) { byDate[d.date] = d.workoutId; }); });
-      adapted.weeks.forEach(function (w) { w.days.forEach(function (d) { if (d.date in byDate) d.workoutId = byDate[d.date]; }); });
-      adapted.lastAdaptation = prev;
-    }
-    if (JSON.stringify(adapted) !== JSON.stringify(st.plan)) R.store.set({ plan: adapted });
-    if (adapted.lastAdaptation && adapted.lastAdaptation.reason && !(prev && prev.date === today && prev.reason === adapted.lastAdaptation.reason)) {
-      R.ui.toast(adapted.lastAdaptation.reason, 'info');
-    }
+    if (JSON.stringify(res.plan) !== JSON.stringify(st.plan)) R.store.set({ plan: res.plan });
+    if (res.reason) R.ui.toast(res.reason, 'info');
   }
 
   function showBanner(text) {
@@ -74,6 +65,7 @@
         if (typeof R.ui.registerCustomRoutes === 'function') R.ui.registerCustomRoutes();
         adaptStoredPlan();
         var cur = R.ui.currentId();
+        if (cur === 'rodar') return; // no interrumpir una rodada en curso
         R.ui.navigate(R.store.get().profile ? (cur === 'onboarding' ? 'inicio' : cur || 'inicio') : 'onboarding');
       }
     } catch (e) { /* sin sincronización: la app sigue con localStorage */ }
