@@ -631,6 +631,24 @@
     return next;
   }
 
+  // Como adaptPlan, pero si el plan ya se adaptó hoy conserva las sesiones elegidas
+  // (solo actualiza estados) para que dos pasadas el mismo día den un solo cambio.
+  // Devuelve { plan, reason }: reason es el motivo nuevo a mostrar (o null).
+  function adaptPlanOnce(plan, activities, profile, o) {
+    const today = todayStr(o && o.today);
+    const adapted = adaptPlan(plan, activities, profile, { today: today });
+    const prev = plan.lastAdaptation;
+    if (prev && prev.date === today) {
+      const byDate = {};
+      plan.weeks.forEach((w) => w.days.forEach((d) => { byDate[d.date] = d.workoutId; }));
+      adapted.weeks.forEach((w) => w.days.forEach((d) => { if (d.date in byDate) d.workoutId = byDate[d.date]; }));
+      adapted.lastAdaptation = prev;
+    }
+    const la = adapted.lastAdaptation;
+    const reason = la && la.reason && !(prev && prev.date === today && prev.reason === la.reason) ? la.reason : null;
+    return { plan: adapted, reason: reason };
+  }
+
   // ======================================================================
   // Ejecución de un entrenamiento
   // ======================================================================
@@ -754,6 +772,7 @@
     getWorkout: getWorkout,
     buildPlan: buildPlan,
     adaptPlan: adaptPlan,
+    adaptPlanOnce: adaptPlanOnce,
     computeMetrics: computeMetrics,
     pmc: pmc,
     powerCurve: powerCurve,

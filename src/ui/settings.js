@@ -249,7 +249,13 @@
               'Tu navegador no permite descargar archivos desde aquí. Copia este texto y guárdalo en un archivo .json. Luego podrás importarlo desde esta misma pantalla.');
           }
         }, 'Exportar respaldo');
-        return section('set-backup', 'Tus datos', 'Todo se guarda en este navegador. Exporta un respaldo para no perderlo o llevarlo a otro equipo.', [
+        try { R.store.flush(); } catch (e) { /* ignorar */ }
+        var persistent = !(R.store.isPersistent && !R.store.isPersistent());
+        var sub = persistent
+          ? 'Todo se guarda en este navegador. Exporta un respaldo para no perderlo o llevarlo a otro equipo.'
+          : null;
+        return section('set-backup', 'Tus datos', sub, [
+          persistent ? null : el('p', { 'class': 'banner', role: 'alert' }, 'No se pudo guardar en este navegador; exporta un respaldo para no perder tus datos.'),
           el('div', { 'class': 'row' }, [
             exp,
             el('button', { type: 'button', 'class': 'btn', onclick: function () { fileInput.click(); } }, 'Importar respaldo'), fileInput,

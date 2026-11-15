@@ -108,21 +108,28 @@
     } catch (e) { /* datos corruptos: se ignoran y se parte de cero */ }
   }
 
+  var lastWriteOk = null; // null = aún sin intentar escribir
+
   function writeLocal() {
     saveTimer = null;
     var ls = getStorage();
-    if (!ls) return false;
+    if (!ls) { lastWriteOk = false; return false; }
     var now = Date.now();
     try {
       ls.setItem(STORAGE_KEY, JSON.stringify(compact(state, 0, now)));
+      lastWriteOk = true;
       return true;
     } catch (e) {
       try {
         ls.setItem(STORAGE_KEY, JSON.stringify(compact(state, 1, now)));
+        lastWriteOk = true;
         return true;
-      } catch (e2) { return false; } // solo memoria
+      } catch (e2) { lastWriteOk = false; return false; } // solo memoria
     }
   }
+
+  // true si hay localStorage y la última escritura funcionó (o aún no se intentó una).
+  function isPersistent() { return !!getStorage() && lastWriteOk !== false; }
 
   function scheduleSave() {
     if (saveTimer !== null) clearTimeout(saveTimer);
@@ -266,6 +273,7 @@
     exportJSON: exportJSON,
     importJSON: importJSON,
     flush: flush,
+    isPersistent: isPersistent,
     load: function () { load(); notify(); return state; },
     _compact: compact,
     _defaults: defaults

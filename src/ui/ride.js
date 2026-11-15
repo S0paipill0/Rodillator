@@ -44,7 +44,7 @@
     return a >= 120 ? sign + fmtTime(a) : sign + Math.round(a) + ' s';
   }
 
-  function fmtKm(m) { return ((m || 0) / 1000).toFixed(m >= 10000 ? 1 : 2); }
+  function fmtKm(m) { return ((m || 0) / 1000).toFixed(m >= 10000 ? 1 : 2).replace('.', ','); }
 
   function ymd(date) {
     const d = date || new Date();
@@ -511,8 +511,8 @@
         opts.appendChild(h('label', { class: 'rd-check' }, [
           h('input', { type: 'checkbox', checked: cfg.ghost && !!best, disabled: !best, onchange: (e) => { cfg.ghost = e.target.checked; } }),
           h('span', {}, [
-            h('b', { text: 'Fantasma de tu mejor marca' + (boost ? ' (+' + boost + ' %)' : '') }),
-            h('small', { text: best ? 'Tu mejor tiempo: ' + L.fmtTime(best.totalTimeS) + (boost ? '; el fantasma va ' + boost + ' % más rápido.' : '.') : 'Aún no tienes una marca en esta ruta: complétala una vez y aparecerá.' }),
+            h('b', { text: 'Fantasma de tu mejor marca' + (boost ? ' (+' + String(boost).replace('.', ',') + ' %)' : '') }),
+            h('small', { text: best ? 'Tu mejor tiempo: ' + L.fmtTime(best.totalTimeS) + (boost ? '; el fantasma va ' + String(boost).replace('.', ',') + ' % más rápido.' : '.') : 'Aún no tienes una marca en esta ruta: complétala una vez y aparecerá.' }),
           ]),
         ]));
         opts.appendChild(h('label', { class: 'rd-lbl', for: 'rd-bots', text: 'Bots rivales (0 a 12)' }));
@@ -573,7 +573,7 @@
           try {
             const boost = settings.ghostBoost || 0;
             ride.ghost = R.riders.createGhost(best, { boostPct: boost });
-            ride.ghostLabel = 'Tu mejor marca' + (boost ? ' (+' + boost + ' %)' : '');
+            ride.ghostLabel = 'Tu mejor marca' + (boost ? ' (+' + String(boost).replace('.', ',') + ' %)' : '');
           } catch (e) { say('No pudimos cargar tu mejor marca: ' + e.message, 'warn'); }
         }
         if (cfg.bots > 0) {
@@ -720,6 +720,7 @@
         c.classList.add('go');
         later(() => { c.classList.remove('is-on', 'go'); c.textContent = ''; }, 700);
         phase = 'ride';
+        ride.startedAt = new Date().toISOString();
         ride.lastMs = performance.now();
         startLoop();
         return;
@@ -1031,7 +1032,7 @@
       const name = r.mode === 'workout' ? r.workout.name : r.mode === 'route' ? r.route.name : 'Rodada libre · ' + r.route.name;
       const activity = L.buildActivity({
         type: r.mode, name, routeId: r.mode === 'route' ? r.route.id : null,
-        workoutId: r.workout ? r.workout.id : null, samples, ftp,
+        workoutId: r.workout ? r.workout.id : null, samples, ftp, date: r.startedAt,
       });
       const completed = auto && ((r.mode === 'route' && r.distM >= r.route.distanceM - 1) || (r.workout && r.tS >= r.workout.durationS));
       const result = { activity, improved: false, deltaS: 0, ghostWon: null, completed: !!completed, route: r.route, mode: r.mode, hadGhost: !!r.ghost };
@@ -1049,7 +1050,6 @@
       }
       try {
         store.set(patch);
-        applyPlan();
       } catch (e) { say('No pudimos guardar la rodada: ' + e.message, 'error'); }
       showRpe(result);
     }
@@ -1057,7 +1057,7 @@
     function applyPlan() {
       const st = store.get();
       if (!st.plan || !profile) return;
-      try { store.set({ plan: R.training.adaptPlan(st.plan, st.activities, st.profile) }); } catch (e) { /* plan sin cambios */ }
+      try { if (R.app && R.app.adaptStoredPlan) R.app.adaptStoredPlan(); } catch (e) { /* plan sin cambios */ }
     }
 
     function showRpe(result) {
@@ -1070,8 +1070,8 @@
         if (n != null) {
           const st = store.get();
           store.set({ activities: (st.activities || []).map((x) => (x.id === a.id ? Object.assign({}, x, { rpe: n }) : x)) });
-          applyPlan();
         }
+        applyPlan();
         showSummary(result);
       };
       const grid = h('div', { class: 'rd-rpe', role: 'radiogroup', 'aria-label': 'Esfuerzo percibido' }, L.RPE_SCALE.map((x) => h('button', {

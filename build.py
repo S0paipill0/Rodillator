@@ -23,7 +23,8 @@ def read(path):
 
 def safe_script(text):
     """Evita que el contenido cierre la etiqueta <script> o <style> por accidente."""
-    return re.sub(r'</(script|style)', lambda m: '<\\/' + m.group(1), text, flags=re.I)
+    text = re.sub(r'</(script|style)', lambda m: '<\\/' + m.group(1), text, flags=re.I)
+    return text.replace('<!--', '<\\!--')
 
 
 def collect_css():

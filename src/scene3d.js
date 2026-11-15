@@ -501,13 +501,13 @@
       });
       var bm = track(new T.MeshBasicMaterial({ map: tex, side: T.DoubleSide, fog: false }));
       var banner = new T.Mesh(bannerGeo, bm);
-      banner.position.set(0, 5.3, 0);
+      banner.position.set(0, 10, 0);                                  // por encima de la cámara de persecución (~5 m)
       banner.rotation.y = -Math.PI / 2;                              // cara hacia quien llega
       g.add(banner);
       for (var s = -1; s <= 1; s += 2) {
         var p = new T.Mesh(postGeo, postMat);
-        p.scale.set(2, 5.6, 2);
-        p.position.set(0, 2.8, s * (ROAD_WIDTH / 2 + 0.7));
+        p.scale.set(2, 10.7, 2);
+        p.position.set(0, 5.35, s * (ROAD_WIDTH / 2 + 0.7));
         g.add(p);
       }
     }

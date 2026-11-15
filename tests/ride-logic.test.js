@@ -166,3 +166,13 @@ test('flush en un segundo entero solo corrige la distancia', () => {
   assert.strictEqual(s.samples.length, 2);
   assert.strictEqual(s.samples[1][5], 5.4);
 });
+
+test('actividad: date es el inicio de la rodada cuando se entrega', () => {
+  const s = L.createSampler();
+  for (let t = 0; t <= 20; t++) s.advance(t, { powerW: 150, hr: null, cadence: null, speedMps: 8, distM: t * 8, eleM: 0 });
+  const start = '2026-03-04T10:00:00.000Z';
+  const a = L.buildActivity({ type: 'route', name: 'X', routeId: 'x', samples: s.samples, ftp: 200, date: start });
+  assert.strictEqual(a.date, start);
+  assert.strictEqual(L.fmtKm(12345), '12,3');
+  assert.strictEqual(L.fmtKm(1234), '1,23');
+});

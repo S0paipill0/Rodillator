@@ -616,3 +616,20 @@ test('motivation: antepone el nombre y siempre empieza en mayúscula', () => {
   }
   assert.ok(upper(T.motivation({ profile: { name: 'ana' }, activities: [], plan: null, today: '2026-03-10' })));
 });
+
+test('adaptPlanOnce: dos pasadas el mismo día dan un solo cambio', () => {
+  const acts = [
+    act('2026-03-02', { workoutId: 'resistencia-60', rpe: 9, tss: 50 }),
+    act('2026-03-03', { workoutId: 'sweetspot-3x12', rpe: 10, tss: 80 }),
+  ];
+  const o = { today: '2026-03-04' };
+  const r1 = T.adaptPlanOnce(handPlan(), acts, baseProfile, o);
+  assert.ok(r1.reason);
+  const changed = dayOf(r1.plan, '2026-03-05').workoutId;
+  assert.notEqual(changed, 'umbral-2x20');
+  const acts2 = acts.concat([act('2026-03-04', { workoutId: 'resistencia-60', rpe: 10, tss: 60 })]);
+  const r2 = T.adaptPlanOnce(r1.plan, acts2, baseProfile, o);
+  assert.equal(dayOf(r2.plan, '2026-03-05').workoutId, changed, 'sin segundo cambio');
+  assert.equal(r2.plan.lastAdaptation.date, '2026-03-04');
+  assert.equal(r2.reason, null, 'sin motivo repetido');
+});
