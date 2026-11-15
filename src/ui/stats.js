@@ -952,7 +952,7 @@
         var xr = { min: 0, max: diff[diff.length - 1].distM / 1000 };
         var c1 = mkChart(eleCard.canvas, { type: 'line', data: { datasets: [{ label: 'Elevación', data: pro, borderColor: C.ink3, borderWidth: 1.5, backgroundColor: 'rgba(125,133,144,0.2)', fill: 'start', pointRadius: 0, tension: 0.2 }] }, options: {
           layout: { padding: { right: 10 } },
-          scales: { x: axisX({ type: 'linear', min: xr.min, max: xr.max, display: false }), y: fixW(axisY({ beginAtZero: false, grace: '10%', ticks: { color: C.ink3, maxTicksLimit: 3 }, title: { display: true, text: 'm', color: C.ink3 } })) },
+          scales: { x: axisX({ type: 'linear', min: xr.min, max: xr.max, display: false }), y: fixW(axisY({ min: pro.length ? Math.floor(Math.min.apply(null, pro.map(function (p) { return p.y; })) / 50) * 50 : undefined, ticks: { color: C.ink3, maxTicksLimit: 3 }, title: { display: true, text: 'm', color: C.ink3 } })) },
           plugins: { legend: { display: false }, tooltip: { enabled: false } } } });
         var c2 = mkChart(diffCard.canvas, { type: 'line', data: { datasets: [{ label: 'Diferencia', data: diff.map(function (d) { return { x: d.distM / 1000, y: d.diffS }; }), borderColor: C.orange, borderWidth: 2.5, pointRadius: 4, pointHoverRadius: 7, pointBackgroundColor: function (c) { return c.raw && c.raw.y <= 0 ? C.blue : C.orange; }, pointBorderColor: C.surface, pointBorderWidth: 2,
           segment: { borderColor: function (c) { return (c.p0.parsed.y + c.p1.parsed.y) / 2 <= 0 ? C.blue : C.orange; } }, fill: { target: 'origin', above: 'rgba(217,89,38,0.16)', below: 'rgba(57,135,229,0.16)' }, tension: 0 }] }, plugins: [crosshair], options: {
