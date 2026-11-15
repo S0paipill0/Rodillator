@@ -74,4 +74,4 @@ Plan = { createdAt, goal, weeks: [{ index, phase: "base"|"construccion"|"especif
 ```
 
 ### Rider para escena 3D
-`{ id, name, kind: "user"|"ghost"|"bot", distM, color, label }`
+`{ id, name, kind: "user"|"ghost"|"bot", distM, color, label, cadenceRpm? }` (cadenceRpm opcional: rpm para animar el pedaleo del modelo glTF; ride.js lo pasa para el usuario)
