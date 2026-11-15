@@ -2,6 +2,7 @@
 """Hornea las rutas de Rodillator: trazado + DEM + textura satelital -> data/routes/<id>.json.
 
 Uso:  python3 tools/bake_routes.py [id ...]      (sin argumentos hornea todas)
+      python3 tools/bake_routes.py --landcover-only [id ...]   (solo terrain.landcover, sin descargas)
 
 Fuentes (únicas permitidas):
   - Elevación: Copernicus DEM GLO-30 (AWS open data, COG 1x1 grado, 1 arcseg).
@@ -653,6 +654,9 @@ def bake(route, log=print):
         terrain=dict(bbox=[round(v, 6) for v in bbox], width=GRID, height=GRID, minEle=min_e, maxEle=max_e,
                      heights=heights, texture=texture, attribution=ATTRIBUTION),
     )
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import landcover
+    data["terrain"]["landcover"] = landcover.build_landcover(data)
     os.makedirs(OUT_DIR, exist_ok=True)
     out = os.path.join(OUT_DIR, route["id"] + ".json")
     with open(out, "w", encoding="utf-8") as f:
@@ -665,7 +669,28 @@ def bake(route, log=print):
     return data
 
 
+def landcover_only(ids, log=print):
+    """Actualiza solo terrain.landcover en data/routes/*.json (sin descargar nada)."""
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import landcover
+    for r in ROUTES:
+        if ids and r["id"] not in ids:
+            continue
+        path = os.path.join(OUT_DIR, r["id"] + ".json")
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        out, cls, _, tex = landcover.build_landcover(data, return_class=True)
+        data["terrain"]["landcover"] = out
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, separators=(",", ":"))
+        landcover.preview(data, cls, tex, "/tmp/landcover-%s.png" % r["id"])
+        log("[%s] landcover %s" % (r["id"], landcover.stats(cls)))
+
+
 def main(argv):
+    if "--landcover-only" in argv:
+        landcover_only(set(a for a in argv if a != "--landcover-only"))
+        return
     wanted = set(argv)
     routes = [r for r in ROUTES if not wanted or r["id"] in wanted]
     if wanted and len(routes) != len(wanted):
