@@ -84,7 +84,7 @@ test('ICS: CRLF, VEVENT solo futuros pendientes, TZID, VALARM y plegado', () => 
   assert.match(ics, /TRIGGER:-PT15M/);
   assert.doesNotMatch(ics, /20200101/);
   const unfolded = ics.replace(/\r\n /g, '');
-  assert.match(unfolded, /SUMMARY:Sweet Spot 3×12\\, con una descripción larga\; para plegar/);
+  assert.ok(unfolded.includes('SUMMARY:Sweet Spot 3×12\\, con una descripción larga\\; para plegar'), 'barra literal antes de , y ;');
   assert.match(unfolded, /DESCRIPTION:Duración: 90 min · TSS: 88\\n/);
   for (const line of ics.split('\r\n')) assert.ok(Buffer.byteLength(line, 'utf8') <= 75, 'línea > 75 octetos: ' + line);
 });
@@ -257,4 +257,103 @@ test('simulador: nudge ±10 W y bajo de cero', () => {
   assert.equal(sim.nudge(10), 110);
   assert.equal(sim.nudge(-10), 100);
   assert.equal(sim.nudge(-500), 0);
+});
+
+test('ICS: escapa barra invertida, punto y coma y coma con barra literal', () => {
+  const w = { w1: { name: 'a;b,c\\d', durationS: 600 } };
+  const ics = I.toICS({ plan: plan(), settings: {}, workouts: w, now: new Date('2026-01-01T12:00:00Z') });
+  assert.ok(ics.includes('SUMMARY:a\\;b\\,c\\\\d\r\n'), ics.split('\r\n').find((l) => l.startsWith('SUMMARY')));
+});
+
+// ---------- Control Point FTMS ----------
+function fakeTrainer(opts = {}) {
+  const log = [];
+  const mkChar = (name) => {
+    const handlers = [];
+    return { name, handlers, notifying: false,
+      addEventListener: (ev, f) => handlers.push(f),
+      startNotifications: async () => { log.push('notify:' + name); },
+      fire(bytes) { const v = new DataView(new Uint8Array(bytes).buffer); handlers.forEach((h) => h({ target: { value: v } })); } };
+  };
+  const bike = mkChar('bike'), cp = mkChar('cp');
+  cp.writeValueWithResponse = async (buf) => {
+    log.push('write:' + Array.from(buf).map((b) => b.toString(16)).join(','));
+    if (opts.respond !== false) queueMicrotask(() => cp.fire([0x80, buf[0], opts.result == null ? 0x01 : opts.result]));
+  };
+  const service = { getCharacteristic: async (u) => {
+    if (u === 0x2AD2) return bike;
+    if (u === 0x2AD9) { if (opts.noControl) { const e = new Error('x'); e.name = 'NotFoundError'; throw e; } return cp; }
+    throw new Error('?');
+  } };
+  const listeners = {};
+  const device = { name: 'Rodillo', gatt: { connected: false,
+    connect: async () => { device.gatt.connected = true; if (opts.failService) service.getPrimaryService = null; return { connected: true, getPrimaryService: async () => { if (opts.failService) throw new Error('fallo'); return service; } }; },
+    disconnect() { device.gatt.connected = false; log.push('disconnect'); } },
+    addEventListener: (ev, f) => { listeners[ev] = f; } };
+  return { log, device, bike, cp };
+}
+function withNavigator(device, fn) {
+  Object.defineProperty(globalThis, 'navigator', { value: { bluetooth: { requestDevice: async () => device } }, configurable: true });
+  return fn().finally(() => delete globalThis.navigator);
+}
+
+test('connectTrainer: indicaciones antes de escribir, espera respuesta y manda 0x00 luego 0x07', async () => {
+  const t = fakeTrainer();
+  const errors = [];
+  const un = R.devices.on('controlError', (e) => errors.push(e));
+  const r = await withNavigator(t.device, () => R.devices.connectTrainer());
+  un();
+  assert.equal(r.controllable, true);
+  assert.equal(errors.length, 0);
+  const i = t.log.indexOf('notify:cp');
+  assert.ok(i >= 0 && i < t.log.indexOf('write:0'), t.log.join(' '));
+  assert.ok(t.log.indexOf('write:0') < t.log.indexOf('write:7'));
+  await withNavigator(t.device, async () => { await R.devices.setErgPower(250); });
+  assert.ok(t.log.includes('write:5,fa,0'));
+  await R.devices.disconnect();
+});
+
+test('connectTrainer: rechazo del control emite controlError en español y sigue en modo libre', async () => {
+  const t = fakeTrainer({ result: 0x04 });
+  const errors = [];
+  const un = R.devices.on('controlError', (e) => errors.push(e));
+  const r = await withNavigator(t.device, () => R.devices.connectTrainer());
+  un();
+  assert.equal(r.controllable, false);
+  assert.equal(errors.length, 1);
+  assert.equal(errors[0].message, 'El rodillo no aceptó el control (ERG/pendiente). Puedes seguir en modo libre.');
+  assert.ok(!t.log.includes('write:7'), 'no debe enviar Start si Request Control falló');
+  await R.devices.disconnect();
+});
+
+test('connectTrainer: sin respuesta en 3 s se trata como fallo', { timeout: 8000 }, async () => {
+  const t = fakeTrainer({ respond: false });
+  const errors = [];
+  const un = R.devices.on('controlError', (e) => errors.push(e));
+  const t0 = Date.now();
+  const r = await withNavigator(t.device, () => R.devices.connectTrainer());
+  un();
+  assert.ok(Date.now() - t0 >= 2900);
+  assert.equal(r.controllable, false);
+  assert.equal(errors[0].kind, 'refused');
+  await R.devices.disconnect();
+});
+
+test('connectTrainer: característica de control ausente se distingue del rechazo', async () => {
+  const t = fakeTrainer({ noControl: true });
+  const errors = [];
+  const un = R.devices.on('controlError', (e) => errors.push(e));
+  const r = await withNavigator(t.device, () => R.devices.connectTrainer());
+  un();
+  assert.equal(r.controllable, false);
+  assert.equal(errors[0].kind, 'absent');
+  assert.match(errors[0].message, /no ofrece control remoto/);
+  await assert.rejects(R.devices.setErgPower(200), /no ofrece control remoto/);
+  await R.devices.disconnect();
+});
+
+test('openDevice: si falla tras gatt.connect() desconecta el GATT', async () => {
+  const t = fakeTrainer({ failService: true });
+  await assert.rejects(withNavigator(t.device, () => R.devices.connectHeartRate()), /Error de Bluetooth/);
+  assert.ok(t.log.includes('disconnect'));
 });

@@ -170,3 +170,34 @@ test('attachDb: errores del db no lanzan', async () => {
   const db = { doc() { throw new Error('boom'); } };
   assert.equal(await S.attachDb(db, 'u3'), false);
 });
+
+test('attachDb: si get() falla no activa la sincronización ni sube el local', async () => {
+  S.reset(); S.set({ profile: { name: 'L' } });
+  let sets = 0;
+  const db = { doc: () => ({ get: async () => { throw new Error('red'); }, set: async () => { sets++; } }) };
+  assert.equal(await S.attachDb(db, 'u4'), false);
+  S.set({ profile: { name: 'L2' } });
+  await wait(3300);
+  assert.equal(sets, 0);
+});
+
+test('attachDb: remoto inválido no se sobrescribe', async () => {
+  S.reset(); S.set({ profile: { name: 'L' } });
+  let sets = 0;
+  const db = { doc: () => ({ get: async () => ({ exists: true, data: () => ({ updatedAt: 1, state: { activities: 'mal' } }) }), set: async () => { sets++; } }) };
+  assert.equal(await S.attachDb(db, 'u5'), false);
+  assert.equal(sets, 0);
+  assert.equal(S.get().profile.name, 'L');
+});
+
+test('pushDb: sube sin samples las actividades de más de 14 días', async () => {
+  S.reset();
+  S.set({ activities: [bigActivity('old', 30, 100), bigActivity('new', 3, 100)] });
+  const db = fakeDb();
+  await S.attachDb(db, 'u6');
+  const st = db.docs.get('data/users/u6/state/main').state;
+  const old = st.activities.find((a) => a.id === 'old'), nw = st.activities.find((a) => a.id === 'new');
+  assert.equal(old.samples, undefined);
+  assert.equal(nw.samples.length, 100);
+  assert.equal(S.get().activities[0].samples.length, 100);
+});

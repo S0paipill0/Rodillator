@@ -20,13 +20,7 @@
     try {
       if (typeof workouts === 'function') return workouts(id) || null;
       if (workouts && workouts[id]) return workouts[id];
-      var T = R.training;
-      if (T) {
-        if (typeof T.getWorkout === 'function') return T.getWorkout(id) || null;
-        var lib = T.workouts || T.WORKOUTS || T.library;
-        if (Array.isArray(lib)) return lib.find(function (w) { return w.id === id; }) || null;
-        if (lib && lib[id]) return lib[id];
-      }
+      if (R.training && typeof R.training.getWorkout === 'function') return R.training.getWorkout(id) || null;
     } catch (e) { /* sin biblioteca de workouts */ }
     return null;
   }
@@ -41,15 +35,11 @@
 
   function positionAt(activity, distM) {
     try {
-      if (!(R.routes && R.routes.sampleAt) || !activity.routeId || !R.routes.get) return null;
+      if (!(R.routes && R.routes.sampleAt && R.routes.get) || !activity.routeId) return null;
       var route = R.routes.get(activity.routeId);
-      if (!route) return null;
-      var p = R.routes.sampleAt(route, distM);
-      if (!p) return null;
-      var lat = Array.isArray(p) ? p[0] : p.lat;
-      var lon = Array.isArray(p) ? p[1] : (p.lon != null ? p.lon : p.lng);
-      if (typeof lat !== 'number' || typeof lon !== 'number' || !isFinite(lat) || !isFinite(lon)) return null;
-      return { lat: lat, lon: lon };
+      var p = route && R.routes.sampleAt(route, distM);
+      if (!p || typeof p.lat !== 'number' || typeof p.lon !== 'number') return null;
+      return { lat: p.lat, lon: p.lon };
     } catch (e) { return null; }
   }
 
@@ -94,7 +84,7 @@
   // ---------- iCalendar ----------
 
   function escIcs(s) {
-    return String(s == null ? '' : s).replace(/\\/g, '\\\\').replace(/;/g, '\;').replace(/,/g, '\\,').replace(/\r?\n/g, '\\n');
+    return String(s == null ? '' : s).replace(/[\\;,]/g, '\\$&').replace(/\r?\n/g, '\\n');
   }
 
   // Pliega a 75 octetos UTF-8 por línea sin partir caracteres.

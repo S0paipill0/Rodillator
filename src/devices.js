@@ -130,8 +130,9 @@
   async function openDevice(options, kind, serviceUuid, charUuid, onValue) {
     var n = nav();
     if (!n || !n.bluetooth) throw new Error(MSG_BLOCKED);
+    var device = null;
     try {
-      var device = await n.bluetooth.requestDevice(options);
+      device = await n.bluetooth.requestDevice(options);
       var server = await device.gatt.connect();
       var service = await server.getPrimaryService(serviceUuid);
       var ch = await service.getCharacteristic(charUuid);
@@ -140,21 +141,58 @@
       device.addEventListener('gattserverdisconnected', function () {
         conns[kind] = null;
         latest[kind] = {};
+        if (kind === 'powermeter') cpState = null;
         emitter.emit('disconnected', { kind: kind });
       });
       conns[kind] = { device: device, server: server, service: service, ch: ch };
       return { name: device.name || '', kind: kind, service: service, server: server };
     } catch (e) {
+      try { if (device && device.gatt && device.gatt.connected) device.gatt.disconnect(); } catch (e2) { /* ya desconectado */ }
+      if (kind === 'powermeter') cpState = null;
       throw translateError(e);
     }
   }
 
+  // ---- Control Point FTMS: comandos serializados con espera de la indicación de respuesta ----
+  var CONTROL_TIMEOUT_MS = 3000;
+  var MSG_CONTROL_REFUSED = 'El rodillo no aceptó el control (ERG/pendiente). Puedes seguir en modo libre.';
+  var MSG_CONTROL_ABSENT = 'Este rodillo no ofrece control remoto (ERG/pendiente). Puedes seguir en modo libre.';
+  var pendingResp = null;   // { opcode, resolve }
+
+  function onControlResponse(dv) {
+    // Respuesta: [0x80, opcode solicitado, resultado]; resultado 0x01 = éxito.
+    if (!dv || dv.byteLength < 3 || dv.getUint8(0) !== 0x80 || !pendingResp) return;
+    if (dv.getUint8(1) !== pendingResp.opcode) return;
+    var p = pendingResp; pendingResp = null;
+    p.resolve(dv.getUint8(2));
+  }
+
+  function controlError(msg, kind) {
+    emitter.emit('controlError', { message: msg, kind: kind || 'refused' });
+    return new Error(msg);
+  }
+
   function writeControl(bytes) {
     var c = conns.trainer && conns.trainer.control;
-    if (!c) return Promise.reject(new Error('No hay un rodillo conectado.'));
+    if (!c) {
+      return Promise.reject(new Error(conns.trainer ? MSG_CONTROL_ABSENT : 'No hay un rodillo conectado.'));
+    }
     var buf = new Uint8Array(bytes);
-    var job = writeChain.then(function () {
-      return typeof c.writeValueWithResponse === 'function' ? c.writeValueWithResponse(buf) : c.writeValue(buf);
+    var opcode = bytes[0];
+    var job = writeChain.then(async function () {
+      var wait = new Promise(function (resolve) {
+        var timer = setTimeout(function () { if (pendingResp && pendingResp.opcode === opcode) pendingResp = null; resolve(null); }, CONTROL_TIMEOUT_MS);
+        pendingResp = { opcode: opcode, resolve: function (r) { clearTimeout(timer); resolve(r); } };
+      });
+      try {
+        if (typeof c.writeValueWithResponse === 'function') await c.writeValueWithResponse(buf); else await c.writeValue(buf);
+      } catch (e) {
+        pendingResp = null;
+        throw controlError(MSG_CONTROL_REFUSED);
+      }
+      var result = await wait;
+      if (result !== 0x01) throw controlError(MSG_CONTROL_REFUSED);
+      return true;
     });
     writeChain = job.catch(function () {});
     return job;
@@ -166,13 +204,25 @@
       'trainer', FTMS, INDOOR_BIKE_DATA,
       function (dv) { latest.trainer = indoorBikeData(dv); publish('trainer'); }
     );
+    var control = null;
     try {
-      conns.trainer.control = await info.service.getCharacteristic(FTMS_CONTROL_POINT);
-      await writeControl([0x00]); // Request Control
-      await writeControl([0x07]); // Start
+      control = await info.service.getCharacteristic(FTMS_CONTROL_POINT);
     } catch (e) {
-      // Sin control (rodillo solo de lectura): se sigue recibiendo datos.
-      if (conns.trainer) conns.trainer.control = null;
+      // Característica ausente: rodillo de solo lectura (distinto de un rechazo de control).
+      controlError(MSG_CONTROL_ABSENT, 'absent');
+    }
+    if (control) {
+      try {
+        control.addEventListener('characteristicvaluechanged', function (ev) { onControlResponse(ev.target.value); });
+        await control.startNotifications();   // indicaciones ANTES de escribir
+        conns.trainer.control = control;
+        await writeControl([0x00]);           // Request Control
+        await writeControl([0x07]);           // Start
+      } catch (e) {
+        if (conns.trainer && conns.trainer.control) { /* el error ya se emitió en writeControl */ }
+        else controlError(MSG_CONTROL_REFUSED);
+        if (conns.trainer) conns.trainer.control = null;
+      }
     }
     return { name: info.name, kind: 'trainer', controllable: !!(conns.trainer && conns.trainer.control) };
   }

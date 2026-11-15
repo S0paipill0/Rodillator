@@ -136,11 +136,24 @@
     });
   }
 
-  function docPath() { return 'data/users/' + dbUserId + '/state/main'; }
+  function getDocRef(dbh, uid) {
+    dbh = dbh || db; uid = uid || dbUserId;
+    if (typeof dbh.doc === 'function') return dbh.doc('data/users/' + uid + '/state/main');
+    return dbh.collection('data/users/' + uid + '/state').doc('main');
+  }
 
-  function getDocRef() {
-    if (typeof db.doc === 'function') return db.doc(docPath());
-    return db.collection('data/users/' + dbUserId + '/state').doc('main');
+  // Versión para el documento remoto: sin samples de actividades de más de 14 días.
+  function compactRemote(st, nowMs) {
+    var out = compact(st, 0, nowMs);
+    out.activities = out.activities.map(function (a) {
+      if (!a || !Array.isArray(a.samples)) return a;
+      var t = Date.parse(a.date);
+      if (!isNaN(t) && (nowMs - t) / DAY_MS > 14) {
+        var c = Object.assign({}, a); delete c.samples; return c;
+      }
+      return a;
+    });
+    return out;
   }
 
   function unwrapDoc(snap) {
@@ -163,7 +176,7 @@
     if (dbBusy) { dbDirty = true; return; }
     dbBusy = true;
     try {
-      var payload = { updatedAt: state.updatedAt, state: compact(state, 0, Date.now()) };
+      var payload = { updatedAt: state.updatedAt, state: compactRemote(state, Date.now()) };
       await getDocRef().set(payload);
     } catch (e) { /* sincronización opcional: no bloquea */ }
     dbBusy = false;
@@ -172,22 +185,23 @@
 
   async function attachDb(dbHandle, userId) {
     if (!dbHandle || !userId) return false;
-    db = dbHandle;
-    dbUserId = userId;
+    var adoptedRemote = false;
     try {
-      var remote = unwrapDoc(await getDocRef().get());
+      var remote = unwrapDoc(await getDocRef(dbHandle, userId).get());
       var remoteState = remote && isObj(remote.state) ? remote.state : null;
       var remoteAt = remote && typeof remote.updatedAt === 'number' ? remote.updatedAt : 0;
-      if (remoteState && remoteAt > state.updatedAt) {
-        var adopted = validate(remoteState);
+      if (remote && !remoteState) throw new Error('remoto inválido');
+      var adopted = remoteState ? validate(remoteState) : null; // si no valida, no se activa la sincronización
+      if (adopted && remoteAt > state.updatedAt) {
         adopted.updatedAt = remoteAt;
         state = adopted;
-        writeLocal();
-        notify();
-        return true;
+        adoptedRemote = true;
       }
-      await pushDb();
-    } catch (e) { /* sin sincronización; sigue local */ }
+    } catch (e) { return false; } // sin lectura válida no se activa la sincronización (no se sobrescribe el remoto)
+    db = dbHandle;      // dbReady: solo tras una lectura inicial correcta
+    dbUserId = userId;
+    if (adoptedRemote) { writeLocal(); notify(); return true; }
+    await pushDb();
     return false;
   }
 
