@@ -69,7 +69,6 @@ ROAD_GAIN = 0.8          # un píxel con "parecido a camino" = 1 abarata el cost
 DEM_SMOOTH_M = 30.0      # suavizado del DEM usado para el costo (el DSM de 30 m es ruidoso)
 PATH_SMOOTH_M = 10.0     # sigma del suavizado gaussiano del trazado (ligero, para conservar las curvas)
 ROAD_ZOOM = 14
-TURN_COST = 0.5          # modo direccional: costo (en celdas) por cada posición de cambio de rumbo (~22 grados)
 
 ROUTES = [
     dict(id="alpe-dhuez", name="Alpe d'Huez", region="Isère", country="Francia", synthetic=False,
@@ -79,12 +78,11 @@ ROUTES = [
          source="Traza GPS de Strava incluida en el paquete R rayshaderanimate (GPL>=2); elevación Copernicus DEM "
                 "GLO-30 © ESA/DLR; imagen Sentinel-2 cloudless by EOX (CC BY-NC-SA 4.0)"),
     dict(id="farellones", name="Camino a Farellones", region="Región Metropolitana", country="Chile", synthetic=True,
-         waypoints=[(-33.3640, -70.4560), (-33.3540, -70.3080)], grid_m=20, climb=True, directional=True,
-         slopes=(0.10, 0.115, 0.13),   # con los umbrales por defecto la ruta de 14 km directos se alarga a >40 km
+         waypoints=[(-33.3640, -70.4560), (-33.3540, -70.3080)], grid_m=20, climb=True, geo_despike=True, slopes=(0.075, 0.095, 0.11), window_pts=25,
          description="Ascenso desde el sector La Ermita hasta Farellones por la cordillera de Santiago. "
                      "El trazado es aproximado, generado sobre el relieve real."),
     dict(id="caracoles-portillo", name="Caracoles de Portillo", region="Valparaíso", country="Chile", synthetic=True,
-         waypoints=[(-32.8780, -70.1500), (-32.8360, -70.1290)], grid_m=20, climb=True, directional=True,
+         waypoints=[(-32.8780, -70.1500), (-32.8360, -70.1290)], grid_m=15, climb=True, geo_despike=True, slopes=(0.04, 0.06, 0.08), window_pts=25,
          description="Los famosos caracoles de la ruta internacional hacia Portillo, desde las cercanías de Juncal. "
                      "El trazado es aproximado, generado sobre el relieve real."),
     dict(id="el-yeso", name="Embalse El Yeso", region="Cajón del Maipo", country="Chile", synthetic=True,
@@ -278,8 +276,7 @@ def slope_multiplier(s, soft=SLOPE_SOFT, strong=SLOPE_STRONG, cap=SLOPE_MAX):
             + DESCENT_K * np.maximum(0.0, -s))
 
 
-def least_cost_path(dem, p_from, p_to, grid_m, slopes=(SLOPE_SOFT, SLOPE_STRONG, SLOPE_MAX), road_gain=ROAD_GAIN,
-                    directional=False):
+def least_cost_path(dem, p_from, p_to, grid_m, slopes=(SLOPE_SOFT, SLOPE_STRONG, SLOPE_MAX), road_gain=ROAD_GAIN):
     """Dijkstra sobre una grilla métrica local (paso grid_m). p = (lat, lon). Devuelve lon, lat."""
     lat0, lon0 = (p_from[0] + p_to[0]) / 2, (p_from[1] + p_to[1]) / 2
     xa, ya = to_xy(p_from[1], p_from[0], lon0, lat0)
@@ -297,7 +294,7 @@ def least_cost_path(dem, p_from, p_to, grid_m, slopes=(SLOPE_SOFT, SLOPE_STRONG,
         return int(round((ymax - y) / grid_m)) * w + int(round((x - xmin) / grid_m))
 
     src, dst = node(xa, ya), node(xb, yb)
-    chain = (_directional_chain if directional else _grid_chain)(z, road, grid_m, slopes, road_gain, src, dst)
+    chain = _grid_chain(z, road, grid_m, slopes, road_gain, src, dst)
     x, y = gx[chain % w], gy[chain // w]
     x[0], y[0], x[-1], y[-1] = xa, ya, xb, yb
     return from_xy(x, y, lon0, lat0)
@@ -326,40 +323,6 @@ def _grid_chain(z, road, grid_m, slopes, road_gain, src, dst):
     while chain[-1] != src:
         chain.append(pred[chain[-1]])
     return np.array(chain[::-1])
-
-
-# 16 rumbos ordenados por ángulo
-HEADINGS = sorted(OFFSETS, key=lambda o: math.atan2(-o[0], o[1]))
-
-
-def _directional_chain(z, road, grid_m, slopes, road_gain, src, dst):
-    """Dijkstra sobre estados (celda, rumbo de 16): el rumbo solo puede cambiar hasta +/-2 posiciones (~45 grados)
-    por paso y cada cambio cuesta TURN_COST*grid_m. Evita los zigzags de escalera de la grilla: el trazado sale
-    con curvas suaves y las horquillas como sucesión de giros moderados."""
-    h, w = z.shape
-    n, nh = h * w, len(HEADINGS)
-    idx = np.arange(n).reshape(h, w)
-    rows, cols, costs = [], [], []
-    for d, (di, dj) in enumerate(HEADINGS):
-        sa = (slice(max(0, -di), h - max(0, di)), slice(max(0, -dj), w - max(0, dj)))
-        sb = (slice(max(0, di), h - max(0, -di)), slice(max(0, dj), w - max(0, -dj)))
-        c = _edge_cost(z, road, sa, sb, math.hypot(di, dj) * grid_m, slopes, road_gain).ravel()
-        a, b = idx[sa].ravel(), idx[sb].ravel()
-        for dp in (-2, -1, 0, 1, 2):
-            rows.append(a * nh + (d + dp) % nh); cols.append(b * nh + d)
-            costs.append(c + TURN_COST * grid_m * abs(dp))
-    source = n * nh
-    rows.append(np.full(nh, source)); cols.append(src * nh + np.arange(nh)); costs.append(np.zeros(nh))
-    graph = csr_matrix((np.concatenate(costs), (np.concatenate(rows), np.concatenate(cols))),
-                       shape=(n * nh + 1, n * nh + 1))
-    dist, pred = dijkstra(graph, directed=True, indices=source, return_predecessors=True)
-    end = dst * nh + int(np.argmin(dist[dst * nh:(dst + 1) * nh]))
-    if not np.isfinite(dist[end]):
-        raise RuntimeError("sin camino")
-    chain = [end]
-    while pred[chain[-1]] != source:
-        chain.append(pred[chain[-1]])
-    return np.array(chain[::-1]) // nh
 
 
 def despike(lon, lat, dem, radius=15.0, min_loop=40.0, max_loop_grade=0.02, step=5.0):
@@ -412,17 +375,54 @@ def round_corners(x, y, half_m=30.0, max_turn=100.0, step=5.0):
     return pts[:, 0], pts[:, 1]
 
 
+def remove_spikes(x, y, max_turn=120.0, gap_m=25.0, step=5.0):
+    """Post-proceso geométrico: mientras exista un vértice con giro > max_turn (punta de espiga o diente de sierra),
+    se elimina ese vértice y los vecinos que forman el retroceso, hasta que el camino de ida y el de vuelta
+    queden a > gap_m. Trabaja sobre la polilínea remuestreada a step m (una punta de espiga es un solo vértice)."""
+    x, y, _ = resample_polyline(x, y, step)
+    pts = np.column_stack([x, y])
+    for _ in range(20000):
+        turns = turn_angles(pts[:, 0], pts[:, 1])
+        if len(turns) == 0 or turns.max() <= max_turn:
+            break
+        i = int(np.argmax(turns)) + 1
+        k = 1
+        while i - k > 0 and i + k < len(pts) - 1 and np.linalg.norm(pts[i - k] - pts[i + k]) <= gap_m:
+            k += 1
+        pts = np.delete(pts, np.arange(i - k + 1, i + k), axis=0)
+    return pts[:, 0], pts[:, 1]
+
+
+def chaikin(x, y, iterations=2):
+    """Chaikin (corte de esquinas 1/4 - 3/4) conservando los extremos."""
+    for _ in range(iterations):
+        nx, ny = [x[0]], [y[0]]
+        for i in range(len(x) - 1):
+            nx += [0.75 * x[i] + 0.25 * x[i + 1], 0.25 * x[i] + 0.75 * x[i + 1]]
+            ny += [0.75 * y[i] + 0.25 * y[i + 1], 0.25 * y[i] + 0.75 * y[i + 1]]
+        nx.append(x[-1]); ny.append(y[-1])
+        x, y = np.array(nx), np.array(ny)
+    return x, y
+
+
 def synthetic_track(waypoints, dem, grid_m, slopes=(SLOPE_SOFT, SLOPE_STRONG, SLOPE_MAX), road_gain=ROAD_GAIN,
-                    directional=False):
+                    geo_despike=False):
     lons, lats = [], []
     for a, b in zip(waypoints[:-1], waypoints[1:]):
-        lo, la = despike(*least_cost_path(dem, a, b, grid_m, slopes, road_gain, directional), dem)
+        lo, la = least_cost_path(dem, a, b, grid_m, slopes, road_gain)
+        if not geo_despike:
+            lo, la = despike(lo, la, dem)
         lons.append(lo if not lons else lo[1:]); lats.append(la if not lats else la[1:])
     lon, lat = np.concatenate(lons), np.concatenate(lats)
     lon0, lat0 = float(lon.mean()), float(lat.mean())
     x, y = to_xy(lon, lat, lon0, lat0)
-    x, y = round_corners(x, y)
-    x, y = smooth_path(x, y, PATH_SMOOTH_M)
+    if geo_despike:                                  # farellones y caracoles: ver remove_spikes
+        x, y = remove_spikes(x, y)
+        x, y, _ = resample_polyline(x, y, STEP_M)
+        x, y = chaikin(x, y, 2)
+    else:
+        x, y = round_corners(x, y)
+        x, y = smooth_path(x, y, PATH_SMOOTH_M)
     return from_xy(x, y, lon0, lat0)
 
 
@@ -490,10 +490,16 @@ def turn_angles(x, y):
     return np.degrees(np.arccos(np.clip(cos, -1, 1)))
 
 
-def build_points(lon, lat, dem, dem_sigma_px=0.0, window_pts=SMOOTH_WINDOW_PTS):
+def build_points(lon, lat, dem, dem_sigma_px=0.0, window_pts=SMOOTH_WINDOW_PTS, max_turn=None):
     lon0, lat0 = float(np.mean(lon)), float(np.mean(lat))
     x, y = to_xy(lon, lat, lon0, lat0)
     x, y, dist = resample_polyline(x, y, STEP_M)
+    for _ in range(8 if max_turn else 0):    # garantía: ningún giro > max_turn entre segmentos de 20 m
+        if turn_angles(x, y).max() <= max_turn:
+            break
+        x, y = remove_spikes(x, y, max_turn=max_turn - 15.0)
+        x, y = chaikin(*resample_polyline(x, y, STEP_M)[:2], 1)
+        x, y, dist = resample_polyline(x, y, STEP_M)
     lo, la = from_xy(x, y, lon0, lat0)
     # se redondea aquí (1 decimal) para que gainM/minEleM/maxEleM coincidan exactamente con los puntos escritos
     arr = gaussian_filter(dem.arr, dem_sigma_px) if dem_sigma_px else None
@@ -619,7 +625,7 @@ def bake(route, log=print):
             pad = 0.05
             dem = Dem([seed[0] - pad, seed[1] - pad, seed[2] + pad, seed[3] + pad])
         lon, lat = synthetic_track(wps, dem, route["grid_m"], route.get("slopes", (SLOPE_SOFT, SLOPE_STRONG, SLOPE_MAX)),
-                                    route.get("road_gain", ROAD_GAIN), route.get("directional", False))
+                                    route.get("road_gain", ROAD_GAIN), route.get("geo_despike", False))
         if route.get("climb"):               # como en Alpe d'Huez: la subida parte del punto más bajo del trazado
             i0 = int(np.argmin(gaussian_filter1d(dem.sample(lon, lat), 5.0)))
             lon, lat = lon[i0:], lat[i0:]
@@ -627,7 +633,7 @@ def bake(route, log=print):
         lon, lat = gpx_climb()
         dem = Dem(bbox_with_margin(lon, lat), pad_deg=0.02)
     # rutas sintéticas: el DEM se suaviza (1 px = 30 m) igual que en el costo, así el perfil respeta el tope de pendiente
-    lo, la, ele, dist = build_points(lon, lat, dem, *((1.0, SYNTH_WINDOW_PTS) if route["synthetic"] else (0.0, SMOOTH_WINDOW_PTS)))
+    lo, la, ele, dist = build_points(lon, lat, dem, *((1.0, route.get("window_pts", SYNTH_WINDOW_PTS), 115.0 if route.get("geo_despike") else None) if route["synthetic"] else (0.0, SMOOTH_WINDOW_PTS)))
     bbox = bbox_with_margin(lo, la)
     if not dem.covers(bbox):
         dem = Dem(bbox)
