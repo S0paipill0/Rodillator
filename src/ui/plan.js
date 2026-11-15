@@ -64,6 +64,7 @@
     id: 'plan', title: 'Plan',
     render: function (container, ctx) {
       var tab = 'calendario';
+      var firstScroll = true;
       var libCat = 'all', libDur = 'all';
       var head = el('header', { 'class': 'view-head' });
       var tabs = el('div', { 'class': 'tabs', role: 'tablist', 'aria-label': 'Secciones del plan' });
@@ -140,7 +141,8 @@
           if (isCurrent) currentCard = card;
           panel.appendChild(card);
         });
-        if (currentCard) setTimeout(function () { try { currentCard.scrollIntoView({ block: 'start' }); window.scrollBy(0, -12); } catch (e) { /* sin scroll */ } }, 0);
+        if (currentCard && firstScroll) setTimeout(function () { try { currentCard.scrollIntoView({ block: 'start' }); window.scrollBy(0, -12); } catch (e) { /* sin scroll */ } }, 0);
+        firstScroll = false;
       }
 
       function dayCell(day, today, actsByDate) {

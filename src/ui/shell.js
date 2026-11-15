@@ -186,6 +186,7 @@
   function go(id, params) {
     var state = R.store.get();
     if (!state.profile && id !== 'onboarding' && id !== 'ajustes') id = 'onboarding';
+    else if (state.profile && id === 'onboarding') id = 'inicio';   // el perfil se cambia desde Ajustes
     var view = views[id], placeholder = false;
     if (!view) { view = placeholderView(id); placeholder = true; }
     if (current && current.view && typeof current.view.destroy === 'function') {
@@ -212,17 +213,20 @@
   }
 
   function navigate(id, params) {
-    var changed = '#' + id !== window.location.hash;
     go(id, params);
-    if (changed) {
-      try { window.location.hash = id; } catch (e) { /* hash no disponible en este entorno */ }
+    if ('#' + current.id !== window.location.hash) {
+      try { window.location.hash = current.id; } catch (e) { /* hash no disponible en este entorno */ }
     }
   }
 
   function onHashChange() {
     var id = (window.location.hash || '').replace(/^#/, '');
-    if (!id || (current && current.id === id)) return;
+    var known = !!views[id] || NAV.some(function (n) { return n.id === id; });
+    if (!id || !known || (current && current.id === id)) return;
     go(id, {});
+    if ('#' + current.id !== window.location.hash) {
+      try { window.location.hash = current.id; } catch (e) { /* hash no disponible */ }
+    }
   }
 
   // ======================================================================
@@ -449,6 +453,8 @@
     buildNav();
     started = true;
     window.addEventListener('hashchange', onHashChange);
+    var skip = document.querySelector('.skip-link');
+    if (skip) skip.addEventListener('click', function (ev) { ev.preventDefault(); try { mainEl().focus(); } catch (e) { /* sin foco */ } });
     var fromHash = (window.location.hash || '').replace(/^#/, '');
     var id = initialId || fromHash || 'inicio';
     go(id, {});
