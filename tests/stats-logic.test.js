@@ -85,7 +85,7 @@ test('splitsFromSamples, timeAt y diffSplits (positivo = más lento)', () => {
   assert.strictEqual(d[0].diffS, 0);
   assert.ok(d[d.length - 1].diffS > 30 && d[d.length - 1].diffS < 45);
   assert.ok(d.every((x, i) => i === 0 || x.diffS >= d[i - 1].diffS)); // ritmo constante: crece monótono
-  assert.deepStrictEqual(L.diffSplits(sf, sf, 1000).every((x) => x.diffS === 0), true);
+  assert.ok(L.diffSplits(sf, sf, 1000).every((x) => x.diffS === 0), 'sin diferencia consigo mismo');
   assert.deepStrictEqual(L.diffSplits([], sf), [{ distM: 0, diffS: 0 }]);
 });
 
@@ -131,7 +131,9 @@ test('generateDemo: 8 semanas coherentes, demo:true, ids reales de ruta y bests 
   const d = L.generateDemo({ today: '2026-11-14', ftp: 230, weightKg: 72, seed: 7 });
   const acts = d.activities;
   assert.ok(acts.length >= 28 && acts.length <= 40);
-  assert.ok(acts.every((a) => a.demo === true && a.id.startsWith('demo-') && a.samples.length === a.durationS + (a.routeId ? 0 : 0) || a.routeId));
+  assert.ok(acts.every((a) => a.demo === true), 'todas marcadas demo:true');
+  assert.ok(acts.every((a) => a.id.startsWith('demo-')), 'ids con prefijo demo-');
+  assert.ok(acts.every((a) => a.samples.length >= a.durationS - 1 && a.samples.length <= a.durationS + 1), 'samples a 1 Hz (una por segundo de duración)');
   assert.ok(acts.every((a) => a.date.slice(0, 10) <= '2026-11-15' && a.tss > 0 && a.avgPower > 0));
   const ids = new Set(acts.filter((a) => a.routeId).map((a) => a.routeId));
   assert.deepStrictEqual([...ids].sort(), ['alpe-dhuez', 'caracoles-portillo', 'el-yeso', 'farellones', 'talagante-valle']);
@@ -158,4 +160,34 @@ test('powerCurveCompare: período vs histórico con fecha de la marca y W/kg', (
   const c = L.powerCurveCompare([rec], [old, rec], [5, 60, 300], 75);
   assert.strictEqual(c[1].period, 250); assert.strictEqual(c[1].best, 300);
   assert.strictEqual(c[1].bestDate, '2026-01-10'); assert.strictEqual(c[1].bestWkg, 4);
+});
+
+test('samples recortadas (1/5, 1/20): la curva usa bestEfforts y no los máximos de las muestras ralas', () => {
+  const full = flat(300, 400);                      // 1 Hz
+  const thin5 = full.filter((_, i) => i % 5 === 0);  // lo que deja store.compact tras 60 días
+  assert.strictEqual(L.samplesTrimmed({ samples: full, durationS: 400 }), false);
+  assert.strictEqual(L.samplesTrimmed({ samples: thin5, durationS: 400 }), true);               // dt mediano 5 s
+  assert.strictEqual(L.samplesTrimmed({ samples: full.slice(0, 100), durationS: 400 }), true);  // menos de 0,9 muestras por segundo
+  assert.strictEqual(L.samplesTrimmed({ samples: null, durationS: 400 }), false);
+  assert.strictEqual(L.countTrimmed([{ samples: thin5, durationS: 400 }, { samples: full, durationS: 400 }]), 1);
+  // con 1/5 de las muestras una ventana de 60 "muestras" equivaldría a 300 s: sin el criterio la curva mentiría
+  const old = { id: 'old', date: '2026-01-10', durationS: 400, samples: thin5, bestEfforts: { 5: 310, 60: 305 } };
+  const c = L.powerCurveCompare([], [old], [5, 15, 60, 300], 70);
+  assert.strictEqual(c[0].best, 310); assert.strictEqual(c[2].best, 305);
+  assert.strictEqual(c[1].best, null, '15 s no existe en bestEfforts: no se inventa desde muestras ralas');
+  assert.strictEqual(c[3].best, null);
+  // el fallback de FTP aplica el mismo criterio
+  const t = { id: 't', date: '2026-02-01', workoutId: 'ftp-20', durationS: 4000, samples: flat(250, 4000).filter((_, i) => i % 5 === 0) };
+  assert.strictEqual(L.ftpHistory([t], null, '2026-11-14').length, 0);
+  const t2 = Object.assign({}, t, { samples: flat(250, 1300), durationS: 1300 });
+  assert.strictEqual(L.ftpHistory([t2], null, '2026-11-14')[0].ftp, 238);
+});
+
+test('zonas: nombres y colores salen de R.training.zones (fuente única)', () => {
+  const z = L.zoneDefs(250), ref = globalThis.R.training.zones(250);
+  assert.deepStrictEqual(z, ref);
+  assert.strictEqual(z.length, 7);
+  assert.strictEqual(L.ZONE_COLORS, undefined);
+  assert.strictEqual(L.ZONE_NAMES, undefined);
+  assert.strictEqual(L.zoneDefs(0).length, 7); // sin FTP usa un valor por defecto, no falla
 });

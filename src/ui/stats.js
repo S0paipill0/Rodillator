@@ -16,11 +16,10 @@
     { key: '1y', label: '1 año', days: 365 },
     { key: 'all', label: 'Todo', days: null },
   ];
-  // Paleta validada (scripts/validate_palette.js, modo oscuro, superficie #171a20).
-  // Z1 gris neutro intencional (recuperación); Z2–Z7 pasan banda L, croma, CVD (ΔE≥8.4) y piso normal (≥15).
-  var ZONE_COLORS = ['#7d8590', '#3987e5', '#c98500', '#199e70', '#d95926', '#9085e9', '#d55181'];
-  var ZONE_NAMES = ['Recuperación', 'Resistencia', 'Tempo', 'Umbral', 'VO2máx', 'Anaeróbico', 'Neuromuscular'];
   var DEFAULT_DURATIONS = [1, 5, 15, 30, 60, 120, 300, 600, 1200, 1800, 3600];
+
+  // Colores y nombres de zona: única fuente R.training.zones(ftp) (SPEC §7).
+  function zoneDefs(ftp) { return R.training.zones(ftp > 0 ? ftp : 200); }
 
   function pad2(n) { return (n < 10 ? '0' : '') + n; }
   function fmtDate(d) { return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()); }
@@ -130,9 +129,23 @@
     return { key: 'overreach', label: 'Sobrecarga', desc: 'Fatiga alta: programa recuperación para evitar sobreentrenar.' };
   }
 
+  // Muestras recortadas por store.compact (1/5, 1/20): dt mediano > 1,5 s o menos de 0,9 muestras por segundo de duración.
+  function samplesTrimmed(a) {
+    var s = a && a.samples;
+    if (!s || s.length < 2) return false;
+    if (a.durationS > 0 && s.length < a.durationS * 0.9) return true;
+    var step = Math.max(1, Math.floor(s.length / 400)), dts = [];
+    for (var i = step; i < s.length; i += step) dts.push((s[i][0] - s[i - step][0]) / step);
+    dts.sort(function (x, y) { return x - y; });
+    return dts[Math.floor(dts.length / 2)] > 1.5;
+  }
+  // Para esfuerzos máximos solo sirven muestras a 1 Hz: si están recortadas se usa bestEfforts (samples: null).
+  function forCurve(a) { return samplesTrimmed(a) ? Object.assign({}, a, { samples: null }) : a; }
+  function countTrimmed(acts) { return (acts || []).filter(samplesTrimmed).length; }
+
   function bestOf(a, w) {
     if (a.bestEfforts && a.bestEfforts[String(w)] != null) return a.bestEfforts[String(w)];
-    if (a.samples && a.samples.length >= w) {
+    if (a.samples && a.samples.length >= w && !samplesTrimmed(a)) {
       var p = a.samples.map(function (s) { return Math.max(0, +s[1] || 0); }), s0 = 0, best = 0, i;
       for (i = 0; i < w; i++) s0 += p[i];
       best = s0;
@@ -168,7 +181,7 @@
 
   function powerCurveCompare(periodActs, allActs, durations, weightKg) {
     var ds = durations || DEFAULT_DURATIONS;
-    var pc = R.training.powerCurve(periodActs, ds), bc = R.training.powerCurve(allActs, ds);
+    var pc = R.training.powerCurve((periodActs || []).map(forCurve), ds), bc = R.training.powerCurve((allActs || []).map(forCurve), ds);
     var pm = {}, bm = {};
     pc.forEach(function (x) { pm[x.durationS] = x; });
     bc.forEach(function (x) { bm[x.durationS] = x; });
@@ -447,9 +460,9 @@
   }
 
   R.statsLogic = {
-    PERIODS: PERIODS, ZONE_COLORS: ZONE_COLORS, ZONE_NAMES: ZONE_NAMES, DEMO_ROUTES: DEMO_ROUTES, DEFAULT_DURATIONS: DEFAULT_DURATIONS,
+    PERIODS: PERIODS, DEMO_ROUTES: DEMO_ROUTES, DEFAULT_DURATIONS: DEFAULT_DURATIONS,
     fmtDate: fmtDate, parseDate: parseDate, addDays: addDays, daysBetween: daysBetween, localDate: localDate, weekStart: weekStart,
-    dayLabel: dayLabel, dayLabelYear: dayLabelYear,
+    dayLabel: dayLabel, zoneDefs: zoneDefs, samplesTrimmed: samplesTrimmed, countTrimmed: countTrimmed, dayLabelYear: dayLabelYear,
     periodRange: periodRange, filterPeriod: filterPeriod, timeInZones: timeInZones, activityZones: activityZones, totalZones: totalZones,
     weeklyAggregate: weeklyAggregate, kpis: kpis, tsbState: tsbState, ftpHistory: ftpHistory, ftpChange: ftpChange, ftpAtDate: ftpAtDate,
     powerCurveCompare: powerCurveCompare, splitsFromSamples: splitsFromSamples, timeAt: timeAt, diffSplits: diffSplits, routeTime: routeTime,
@@ -462,7 +475,7 @@
   // PARTE 2 — INTERFAZ
   // =====================================================================
   var L = R.statsLogic;
-  var C = { accent: '#FF5A1F', gold: '#FFD23F', ctl: '#3987e5', atl: '#d55181', tsb: '#c9ccd3', ink: '#eef0f3', ink2: '#aab0bb', ink3: '#7d8590',
+  var C = { accent: '#FF5A1F', gold: '#FFD23F', ctl: '#3987e5', atl: '#d55181', tsb: '#c9ccd3', ink: '#eef0f3', ink2: '#aab0bb', ink3: '#7d8590', zoneEdge: 'rgba(238,240,243,0.38)',
     surface: '#171a20', grid: 'rgba(255,255,255,0.07)', line: '#2a2f3a', blue: '#3987e5', orange: '#d95926', hr: '#d55181', cad: '#3987e5' };
   var ICON = '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 20V10M10 20V4M16 20v-8M22 20H2"/></svg>';
 
@@ -471,7 +484,27 @@
   var prefs = { period: '3m', hist: { type: 'all', q: '', limit: 25 }, route: null };
 
   // ---------- utilidades DOM ----------
+  // R.ui.el se usa solo si existe y supera una prueba de contrato idéntica a la de este helper (class, text, aria-*, on*, hidden, hijos);
+  // si no, se usa el helper propio de abajo.
+  var shellEl;
+  function useShellEl() {
+    if (shellEl !== undefined) return shellEl;
+    shellEl = null;
+    try {
+      if (R.ui && typeof R.ui.el === 'function') {
+        var fired = 0;
+        var t = R.ui.el('button', { class: 'st-probe', text: 't', 'aria-label': 'l', hidden: true, onclick: function () { fired++; } }, 'u', null, [R.ui.el('i', { text: 'v' })]);
+        if (t && t.nodeType === 1 && t.tagName === 'BUTTON') {
+          t.click();
+          if (t.className === 'st-probe' && t.textContent === 'tuv' && t.getAttribute('aria-label') === 'l' && t.hasAttribute('hidden') && fired === 1) shellEl = R.ui.el;
+        }
+      }
+    } catch (e) { shellEl = null; }
+    return shellEl;
+  }
   function h(tag, props) {
+    var se = useShellEl();
+    if (se) return se.apply(R.ui, arguments);
     var e = document.createElement(tag), i, k;
     props = props || {};
     for (k in props) {
@@ -513,8 +546,34 @@
   function fmtSigned(n, d, unit) { var v = fmtNum(Math.abs(n), d); return (n > 0 ? '+' : n < 0 ? '−' : '') + v + (unit || ''); }
   function fmtSignedDur(s) { var a = Math.abs(Math.round(s)); return (s > 0 ? '+' : s < 0 ? '−' : '') + fmtDur(a); }
 
-  // ---------- modal propio ----------
+  // ---------- modales ----------
+  // Pila de modales abiertos (confirmaciones anidadas sobre el detalle): solo el superior reacciona a Escape/Tab.
+  var modalStack = [];
+  function topModal() { return modalStack[modalStack.length - 1] || null; }
+  function closeAllModals() { while (modalStack.length) modalStack[modalStack.length - 1].close(); }
+
+  // Usa R.ui.modal solo si existe y se comporta como se espera (devuelve un manejador con close() y monta nuestro cuerpo en el documento);
+  // si no, cae al modal propio.
+  function openShellModal(opts) {
+    if (!(R.ui && typeof R.ui.modal === 'function')) return null;
+    var body = h('div', { class: 'st-modal-body st-modal-body--shell' }), handle = null;
+    try { handle = R.ui.modal({ title: opts.title || '', content: body, body: body, wide: !!opts.wide, onClose: function () { if (api && !api.closed) api.close(true); } }); } catch (e) { handle = null; }
+    var closeFn = handle && (typeof handle.close === 'function' ? handle.close.bind(handle) : (typeof handle === 'function' ? handle : null));
+    if (!closeFn || !body.isConnected) { if (closeFn) { try { closeFn(); } catch (e) { /* noop */ } } return null; }
+    var api = { el: body, closed: false, onClose: null, shell: true,
+      close: function (fromShell) {
+        if (api.closed) return; api.closed = true;
+        var i = modalStack.indexOf(api); if (i >= 0) modalStack.splice(i, 1);
+        if (!fromShell) { try { closeFn(); } catch (e) { /* noop */ } }
+        if (api.onClose) api.onClose();
+      } };
+    modalStack.push(api);
+    return api;
+  }
+
   function openModal(opts) {
+    var viaShell = openShellModal(opts);
+    if (viaShell) return viaShell;
     var prevFocus = document.activeElement;
     var body = h('div', { class: 'st-modal-body' });
     var titleId = 'st-modal-t-' + Math.random().toString(36).slice(2, 7);
@@ -527,13 +586,17 @@
       close: function () {
         if (api.closed) return; api.closed = true;
         document.removeEventListener('keydown', onKey, true);
+        var i = modalStack.indexOf(api); if (i >= 0) modalStack.splice(i, 1);
         if (back.parentNode) back.parentNode.removeChild(back);
         if (api.onClose) api.onClose();
-        if (S) S.modal = null;
-        if (prevFocus && prevFocus.focus) { try { prevFocus.focus(); } catch (e) { /* noop */ } }
-      } };
+        var t = topModal(); // el foco vuelve al modal inferior o al elemento que abrió el primero
+        if (t && t.focusFirst) t.focusFirst();
+        else if (prevFocus && prevFocus.focus) { try { prevFocus.focus(); } catch (e) { /* noop */ } }
+      },
+      focusFirst: function () { var f = dlg.querySelector('button'); if (f) f.focus(); } };
     function onKey(ev) {
-      if (ev.key === 'Escape') { ev.stopPropagation(); api.close(); }
+      if (topModal() !== api) return; // solo el modal superior
+      if (ev.key === 'Escape') { ev.stopImmediatePropagation(); ev.preventDefault(); api.close(); }
       else if (ev.key === 'Tab') {
         var f = dlg.querySelectorAll('button,input,select,textarea,[tabindex]:not([tabindex="-1"])');
         if (!f.length) return;
@@ -542,11 +605,11 @@
         else if (!ev.shiftKey && document.activeElement === last) { ev.preventDefault(); first.focus(); }
       }
     }
-    back.addEventListener('pointerdown', function (ev) { if (ev.target === back) api.close(); });
+    back.addEventListener('pointerdown', function (ev) { if (ev.target === back && topModal() === api) api.close(); });
     document.addEventListener('keydown', onKey, true);
     document.body.appendChild(back);
-    if (S) S.modal = api;
-    var f0 = dlg.querySelector('button'); if (f0) f0.focus();
+    modalStack.push(api);
+    api.focusFirst();
     return api;
   }
 
@@ -559,15 +622,10 @@
   var hasChart = function () { return typeof window !== 'undefined' && typeof window.Chart === 'function'; };
   function reduceMotion() { try { return window.matchMedia('(prefers-reduced-motion: reduce)').matches; } catch (e) { return false; } }
 
-  function themeChart() {
-    var D = window.Chart.defaults;
-    D.color = C.ink2; D.font.family = "'Inter', system-ui, sans-serif"; D.font.size = 11;
-    D.borderColor = C.grid;
-    if (reduceMotion()) D.animation = false;
-  }
+  var FONT = "'Inter', system-ui, sans-serif";
   function tipStyle(extra) {
     return Object.assign({ backgroundColor: '#0e1014', borderColor: C.line, borderWidth: 1, titleColor: C.ink2, bodyColor: C.ink, padding: 10, cornerRadius: 8,
-      titleFont: { weight: '500', size: 11 }, bodyFont: { size: 12, weight: '600' }, boxWidth: 14, boxHeight: 3, usePointStyle: false, displayColors: true, caretSize: 5 }, extra || {});
+      titleFont: { family: FONT, weight: '500', size: 11 }, bodyFont: { family: FONT, size: 12, weight: '600' }, footerFont: { family: FONT, size: 11, weight: '500' }, footerColor: C.ink2, boxWidth: 14, boxHeight: 3, usePointStyle: false, displayColors: true, caretSize: 5 }, extra || {});
   }
   var crosshair = { id: 'crosshair', afterDatasetsDraw: function (chart) {
     var a = chart.tooltip && chart.tooltip.getActiveElements && chart.tooltip.getActiveElements();
@@ -575,15 +633,26 @@
     var x = a[0].element.x, ca = chart.chartArea, ctx = chart.ctx;
     ctx.save(); ctx.strokeStyle = 'rgba(255,255,255,0.28)'; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(x, ca.top); ctx.lineTo(x, ca.bottom); ctx.stroke(); ctx.restore();
   } };
-  function mkChart(canvas, cfg) {
-    cfg.options = cfg.options || {};
-    cfg.options.responsive = true; cfg.options.maintainAspectRatio = false;
+  // Tema oscuro por gráfico (no se toca Chart.defaults, que es global y lo comparten otras vistas).
+  // `list` = arreglo donde registrar la instancia (por defecto S.charts; los modales usan el suyo).
+  function mkChart(canvas, cfg, list) {
+    var o = cfg.options = cfg.options || {};
+    o.responsive = true; o.maintainAspectRatio = false;
+    o.color = C.ink2; o.borderColor = C.grid; o.font = { family: FONT, size: 11 };
+    if (reduceMotion()) o.animation = false;
     var ch = new window.Chart(canvas, cfg);
-    S.charts.push(ch);
+    (list || S.charts).push(ch);
     return ch;
   }
-  function axisX(extra) { return Object.assign({ grid: { display: false }, border: { color: C.line }, ticks: { color: C.ink3, maxRotation: 0, autoSkip: true } }, extra || {}); }
-  function axisY(extra) { return Object.assign({ grid: { color: C.grid }, border: { display: false }, ticks: { color: C.ink3 } }, extra || {}); }
+  function mergeAxis(base, extra) {
+    var out = Object.assign({}, base, extra || {});
+    out.ticks = Object.assign({}, base.ticks, (extra && extra.ticks) || {}); out.ticks.font = Object.assign({ family: FONT, size: 11 }, out.ticks.font);
+    if (out.title) out.title = Object.assign({ color: C.ink3, font: { family: FONT, size: 11, weight: '500' } }, out.title);
+    return out;
+  }
+  function axisX(extra) { return mergeAxis({ grid: { display: false }, border: { color: C.line }, ticks: { color: C.ink3, maxRotation: 0, autoSkip: true } }, extra); }
+  function axisY(extra) { return mergeAxis({ grid: { color: C.grid }, border: { display: false }, ticks: { color: C.ink3 } }, extra); }
+  function destroyList(list) { while (list.length) { try { list.pop().destroy(); } catch (e) { /* noop */ } } }
 
   // Tarjeta con título, leyenda y vista "Tabla" alternativa.
   function chartCard(o) {
@@ -660,7 +729,6 @@
     root.appendChild(header(D));
     if (!hasChart()) root.appendChild(h('div', { class: 'st-notice', role: 'status', text: 'No se pudo cargar la librería de gráficos: se muestran tablas con los mismos datos.' }));
     if (!D.acts.length) { root.appendChild(emptyState()); return; }
-    if (hasChart()) themeChart();
     root.appendChild(kpiGrid(D));
     if (!D.inP.length) root.appendChild(h('div', { class: 'st-notice', role: 'status', text: 'No hay rodadas en este período. Prueba con un rango más amplio.' }));
     var grid = h('div', { class: 'st-grid' });
@@ -778,16 +846,16 @@
 
   // ---------- semanas ----------
   function weeklyCard(D) {
-    var weeks = L.weeklyAggregate(D.inP, D.range, D.ftpOf);
+    var weeks = L.weeklyAggregate(D.inP, D.range, D.ftpOf), ZD = L.zoneDefs(D.curFtp);
     var two = h('div', { class: 'st-split' });
     var c1 = chartCard({ title: 'Horas por semana, por zona', sub: 'Tiempo en cada zona de potencia (zonas Coggan)', height: 250,
       alt: 'Barras apiladas de horas semanales por zona de potencia',
-      table: function () { return { head: ['Semana del', 'Horas'].concat(L.ZONE_NAMES.map(function (n, i) { return 'Z' + (i + 1) + ' (h)'; })), rows: weeks.map(function (w) { return [w.label, fmtNum(w.hours, 1)].concat(w.zoneS.map(function (s) { return fmtNum(s / 3600, 1); })); }) }; } });
+      table: function () { return { head: ['Semana del', 'Horas'].concat(ZD.map(function (z) { return 'Z' + z.zone + ' (h)'; })), rows: weeks.map(function (w) { return [w.label, fmtNum(w.hours, 1)].concat(w.zoneS.map(function (s) { return fmtNum(s / 3600, 1); })); }) }; } });
     var c2 = chartCard({ title: 'TSS por semana', sub: 'Carga total de cada semana', height: 250, alt: 'Barras de TSS semanal',
       table: function () { return { head: ['Semana del', 'TSS', 'Sesiones'], rows: weeks.map(function (w) { return [w.label, fmtNum(w.tss, 0), w.sessions]; }) }; } });
     if (hasChart()) {
       var labels = weeks.map(function (w) { return w.label; });
-      var ds = L.ZONE_NAMES.map(function (n, i) { return { label: 'Z' + (i + 1) + ' ' + n, data: weeks.map(function (w) { return w.zoneS[i] / 3600; }), backgroundColor: L.ZONE_COLORS[i], borderColor: C.surface, borderWidth: 1, borderRadius: 0, stack: 's' }; });
+      var ds = ZD.map(function (z, i) { return { label: 'Z' + z.zone + ' ' + z.name, data: weeks.map(function (w) { return w.zoneS[i] / 3600; }), backgroundColor: z.color, borderColor: C.zoneEdge, borderWidth: 1, borderRadius: 0, stack: 's' }; });
       var ch1 = mkChart(c1.canvas, { type: 'bar', data: { labels: labels, datasets: ds }, options: {
         interaction: { mode: 'index', intersect: false },
         scales: { x: axisX({ stacked: true, title: { display: true, text: 'Semana (inicia el lunes)', color: C.ink3 } }), y: axisY({ stacked: true, title: { display: true, text: 'Horas', color: C.ink3 } }) },
@@ -795,7 +863,7 @@
           title: function (it) { return 'Semana del ' + weeks[it[0].dataIndex].label; },
           label: function (c) { return c.parsed.y > 0 ? ' ' + fmtNum(c.parsed.y, 1) + ' h   ' + c.dataset.label : null; },
           footer: function (it) { var w = weeks[it[0].dataIndex]; return fmtNum(w.hours, 1) + ' h · ' + fmtNum(w.tss, 0) + ' TSS · ' + w.sessions + ' sesiones'; } } }) } } });
-      L.ZONE_NAMES.forEach(function (n, i) { c1.legend.appendChild(legendItem('Z' + (i + 1), L.ZONE_COLORS[i], 'bar', false, function (on) { ch1.setDatasetVisibility(i, on); ch1.update(); })); });
+      ZD.forEach(function (z, i) { c1.legend.appendChild(legendItem('Z' + z.zone, z.color, 'bar', false, function (on) { ch1.setDatasetVisibility(i, on); ch1.update(); })); });
       mkChart(c2.canvas, { type: 'bar', data: { labels: labels, datasets: [{ label: 'TSS', data: weeks.map(function (w) { return w.tss; }), backgroundColor: C.accent, borderRadius: { topLeft: 4, topRight: 4 }, maxBarThickness: 36 }] }, options: {
         scales: { x: axisX({ title: { display: true, text: 'Semana (inicia el lunes)', color: C.ink3 } }), y: axisY({ beginAtZero: true, title: { display: true, text: 'TSS', color: C.ink3 } }) },
         plugins: { legend: { display: false }, tooltip: tipStyle({ callbacks: {
@@ -812,6 +880,7 @@
     var cmp = L.powerCurveCompare(D.inP, D.acts, L.DEFAULT_DURATIONS, D.profile.weightKg);
     var card = chartCard({ title: 'Curva de potencia', sub: 'Mejor potencia media para cada duración: ' + D.range.label.toLowerCase() + ' frente a tu mejor marca histórica', height: 290, span: 2,
       alt: 'Curva de potencia con eje de duración logarítmico, período frente a mejor histórico',
+      foot: L.countTrimmed(D.acts) ? 'En actividades antiguas solo se conservan 5 s, 1, 5, 20 y 60 min.' : null,
       table: function () { return { head: ['Duración', 'Período (W)', 'Mejor histórico (W)', 'W/kg histórico', 'Fecha de la marca'], rows: cmp.map(function (r) { return [fmtDurShort(r.durationS), r.period, r.best, r.bestWkg != null ? fmtNum(r.bestWkg, 2) : null, r.bestDate ? L.dayLabelYear(L.localDate(r.bestDate)) : null]; }) }; } });
     if (!hasChart()) return card;
     var pts = function (k) { return cmp.filter(function (r) { return r[k] != null; }).map(function (r) { return { x: r.durationS, y: r[k], r: r }; }); };
@@ -870,7 +939,7 @@
   // ---------- zonas ----------
   function zonesCard(D) {
     var z = L.totalZones(D.inP, D.ftpOf), tot = z.reduce(function (a, b) { return a + b; }, 0);
-    var labels = L.ZONE_NAMES.map(function (n, i) { return 'Z' + (i + 1) + ' ' + n; });
+    var ZD = L.zoneDefs(D.curFtp), labels = ZD.map(function (zz) { return 'Z' + zz.zone + ' ' + zz.name; });
     var card = chartCard({ title: 'Tiempo en zonas', sub: 'Distribución de tu tiempo pedaleado en el período', height: 250, alt: 'Barras horizontales de horas por zona de potencia',
       table: function () { return { head: ['Zona', 'Horas', '% del tiempo'], rows: z.map(function (s, i) { return [labels[i], fmtNum(s / 3600, 1), tot ? fmtNum(s / tot * 100, 0) + ' %' : '0 %']; }) }; } });
     if (!hasChart()) return card;
@@ -879,9 +948,9 @@
       m.data.forEach(function (bar, i) { ctx.fillText(fmtNum(z[i] / 3600, 1) + ' h · ' + (tot ? fmtNum(z[i] / tot * 100, 0) : 0) + ' %', bar.x + 8, bar.y); });
       ctx.restore();
     } };
-    mkChart(card.canvas, { type: 'bar', data: { labels: labels, datasets: [{ label: 'Horas', data: z.map(function (s) { return s / 3600; }), backgroundColor: L.ZONE_COLORS, borderRadius: 4, barThickness: 20 }] }, plugins: [valueLabels], options: {
+    mkChart(card.canvas, { type: 'bar', data: { labels: labels, datasets: [{ label: 'Horas', data: z.map(function (s) { return s / 3600; }), backgroundColor: ZD.map(function (zz) { return zz.color; }), borderColor: C.zoneEdge, borderWidth: 1, borderRadius: 4, barThickness: 20 }] }, plugins: [valueLabels], options: {
       indexAxis: 'y', layout: { padding: { right: 78 } },
-      scales: { x: axisY({ beginAtZero: true, title: { display: true, text: 'Horas', color: C.ink3 } }), y: { grid: { display: false }, border: { display: false }, ticks: { color: C.ink2 } } },
+      scales: { x: axisY({ beginAtZero: true, title: { display: true, text: 'Horas', color: C.ink3 } }), y: axisY({ grid: { display: false }, ticks: { color: C.ink2 } }) },
       plugins: { legend: { display: false }, tooltip: tipStyle({ displayColors: false, callbacks: {
         label: function (c) { return ' ' + fmtNum(c.parsed.x, 1) + ' h · ' + (tot ? fmtNum(z[c.dataIndex] / tot * 100, 0) : 0) + ' % del tiempo'; },
         afterLabel: function (c) { var zz = R.training.zones(D.curFtp || 200)[c.dataIndex]; return zz ? ' ' + zz.minW + (zz.maxW != null ? '–' + zz.maxW : '+') + ' W (con FTP ' + (D.curFtp || 200) + ' W)' : ''; } } }) } } });
@@ -1001,10 +1070,19 @@
     return { el: card };
   }
 
+  function ftpLinePlugin(ftpW) {
+    return { id: 'ftpLine', afterDatasetsDraw: function (c) {
+      var y = c.scales.y, ca = c.chartArea, yy = y.getPixelForValue(ftpW);
+      if (yy < ca.top || yy > ca.bottom) return;
+      var x = c.ctx; x.save(); x.strokeStyle = 'rgba(255,210,63,0.7)'; x.setLineDash([5, 4]); x.beginPath(); x.moveTo(ca.left, yy); x.lineTo(ca.right, yy); x.stroke();
+      x.fillStyle = C.gold; x.font = '600 10px Inter, sans-serif'; x.textAlign = 'right'; x.fillText('FTP ' + ftpW + ' W', ca.right - 4, yy - 4); x.restore();
+    } };
+  }
+
   // ---------- detalle de actividad ----------
   function openActivity(a) {
     var D = S.D, m = openModal({ title: a.name + ' · ' + L.dayLabelYear(L.localDate(a.date)), wide: true });
-    var box = m.el, charts = [];
+    var box = m.el, charts = []; // `charts`: gráficos del modal, aparte de S.charts para que refresh() no los destruya
     var metrics = [['Duración', fmtDur(a.durationS)], ['Distancia', fmtNum((a.distanceM || 0) / 1000, 1) + ' km'], ['Potencia media', fmtNum(a.avgPower, 0) + ' W'], ['Potencia normalizada', fmtNum(a.np, 0) + ' W'],
       ['IF', fmtNum(a.if, 2)], ['TSS', fmtNum(a.tss, 0)], ['FC media', a.avgHr ? fmtNum(a.avgHr, 0) + ' ppm' : '–'], ['Cadencia media', a.avgCadence ? fmtNum(a.avgCadence, 0) + ' rpm' : '–'],
       ['Energía', fmtNum((a.avgPower || 0) * (a.durationS || 0) / 1000, 0) + ' kJ'], ['RPE', a.rpe != null ? a.rpe + ' / 10' : '–']];
@@ -1033,16 +1111,13 @@
         var canvas = h('canvas', { role: 'img', 'aria-label': s.key + ' a lo largo de la actividad' });
         card.lastChild.appendChild(canvas); wrapEl.appendChild(card);
         var ds = [{ label: s.key, data: win(s.idx), borderColor: s.color, borderWidth: 1.75, pointRadius: 0, pointHoverRadius: 4, tension: 0.15, fill: s.idx === 1 ? 'origin' : false, backgroundColor: 'rgba(255,90,31,0.1)', spanGaps: true }];
-        var ch = mkChart(canvas, { type: 'line', data: { datasets: ds }, plugins: [crosshair, selPlugin], options: {
+        var plugs = [crosshair, selPlugin];
+        if (s.idx === 1 && ftpLine) plugs.push(ftpLinePlugin(ftpLine)); // el plugin va en el array plugins desde la creación
+        var ch = mkChart(canvas, { type: 'line', data: { datasets: ds }, plugins: plugs, options: {
           animation: false, interaction: { mode: 'nearest', axis: 'x', intersect: false },
           scales: { x: axisX({ type: 'linear', min: 0, max: tMax, ticks: { color: C.ink3, maxTicksLimit: 8, callback: function (v) { return fmtDur(v); } }, display: si === series.length - 1 }),
             y: axisY({ beginAtZero: s.idx !== 2, suggestedMin: s.idx === 2 ? undefined : 0, title: { display: false }, afterFit: function (sc) { sc.width = 48; } }) },
-          plugins: { legend: { display: false }, crosshair: true, tooltip: tipStyle({ displayColors: false, callbacks: { title: function (it) { return fmtDur(it[0].parsed.x); }, label: function (c) { return ' ' + fmtNum(c.parsed.y, 0) + ' ' + s.unit + '   ' + s.key; } } }) } } });
-        charts.push(ch);
-        if (s.idx === 1 && ftpLine) {
-          ch.options.plugins.ftpMark = true;
-          ch.config.plugins.push({ id: 'ftpLine', afterDatasetsDraw: function (c) { var y = c.scales.y, ca = c.chartArea, yy = y.getPixelForValue(ftpLine); if (yy < ca.top || yy > ca.bottom) return; var x = c.ctx; x.save(); x.strokeStyle = 'rgba(255,210,63,0.7)'; x.setLineDash([5, 4]); x.beginPath(); x.moveTo(ca.left, yy); x.lineTo(ca.right, yy); x.stroke(); x.fillStyle = C.gold; x.font = '600 10px Inter, sans-serif'; x.textAlign = 'right'; x.fillText('FTP ' + ftpLine + ' W', ca.right - 4, yy - 4); x.restore(); } });
-        }
+          plugins: { legend: { display: false }, crosshair: true, tooltip: tipStyle({ displayColors: false, callbacks: { title: function (it) { return fmtDur(it[0].parsed.x); }, label: function (c) { return ' ' + fmtNum(c.parsed.y, 0) + ' ' + s.unit + '   ' + s.key; } } }) } } }, charts);
         // selección por arrastre + rueda + doble clic
         var px = function (ev) { var r = canvas.getBoundingClientRect(); return ev.clientX - r.left; };
         canvas.style.touchAction = 'pan-y';
@@ -1062,7 +1137,7 @@
       }
       function zoomBy(f) { var c = (zoom.min + zoom.max) / 2, half = (zoom.max - zoom.min) / 2 * f; setZoom(c - half, c + half); }
       resetBtn.disabled = true;
-      m.onClose = function () { charts.forEach(function (c) { var i = S && S.charts.indexOf(c); if (i >= 0) S.charts.splice(i, 1); try { c.destroy(); } catch (e) { /* noop */ } }); };
+      m.onClose = function () { destroyList(charts); };
     } else if (samples.length <= 2) {
       box.appendChild(h('p', { class: 'st-empty-note', text: 'Esta rodada no conserva datos segundo a segundo.' }));
     }
@@ -1140,7 +1215,7 @@
       if (!S) return;
       if (S.unsub) S.unsub();
       if (S.timer) S.timer();
-      if (S.modal) S.modal.close();
+      closeAllModals();
       destroyCharts();
       if (S.root && S.root.parentNode) S.root.parentNode.removeChild(S.root);
       S = null;
