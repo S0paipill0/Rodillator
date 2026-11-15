@@ -164,3 +164,14 @@ test('buildRoadPath/pathPose: y de mundo, +0.4 m sobre el terreno, rumbo este y 
   I.pathPose(path, -100, pose);                             // acotado al inicio
   assert.ok(Math.abs(pose.x - path.X[0]) < 1e-9);
 });
+
+test('viewOffsetFor desplaza el centro óptico al centro de la zona libre', () => {
+  const f = globalThis.R.Scene3D._internals.viewOffsetFor;
+  assert.deepEqual(f(390, 844, {}), { x: 0, y: 0 });
+  assert.deepEqual(f(390, 844, { top: 130, bottom: 95 }), { x: 0, y: -17.5 });
+  assert.deepEqual(f(844, 390, { top: 50, bottom: 40, right: 100 }), { x: 50, y: -5 });
+  // el centro de la imagen queda en (w/2 - x, h/2 - y) = centro de la zona libre
+  const o = f(400, 800, { top: 100, bottom: 300, left: 20, right: 60 });
+  assert.equal(400 / 2 - o.x, (20 + 340) / 2);
+  assert.equal(800 / 2 - o.y, (100 + 500) / 2);
+});

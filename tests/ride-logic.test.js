@@ -176,3 +176,44 @@ test('actividad: date es el inicio de la rodada cuando se entrega', () => {
   assert.strictEqual(L.fmtKm(12345), '12,3');
   assert.strictEqual(L.fmtKm(1234), '1,23');
 });
+
+// ---- HUD de celular (Tarea 10) ----
+test('positionPill: con fantasma y sin fantasma', () => {
+  const L = globalThis.R.rideLogic;
+  const ranked = [{ id: 'a' }, { id: 'b' }, { id: 'user' }];
+  assert.equal(L.positionPill(ranked, 'user', 12), '3.º · Fantasma +12 s');
+  assert.equal(L.positionPill(ranked, 'user', -5), '3.º · Fantasma −5 s');
+  assert.equal(L.positionPill(ranked, 'user', null), '3.º de 3');
+  assert.equal(L.positionPill([{ id: 'user' }], 'user', null), '1.º');
+  assert.equal(L.positionPill(ranked, 'nadie', null), '');
+});
+
+test('computeViewInsets: márgenes del HUD relativos a la escena', () => {
+  const L = globalThis.R.rideLogic;
+  const sc = { top: 0, bottom: 844, left: 0, right: 390 };
+  assert.deepEqual(L.computeViewInsets({ scene: sc, top: { bottom: 125 }, strip: { top: 745 }, controls: { left: 330 } }), { top: 125, bottom: 99, left: 0, right: 60 });
+  assert.deepEqual(L.computeViewInsets({ scene: sc }), { top: 0, bottom: 0, left: 0, right: 0 });
+  assert.deepEqual(L.computeViewInsets(null), { top: 0, bottom: 0, left: 0, right: 0 });
+});
+
+test('createDoubleTap: dos toques cercanos en tiempo y espacio', () => {
+  const L = globalThis.R.rideLogic;
+  const d = L.createDoubleTap(300, 30);
+  assert.equal(d.tap(1000, 100, 100), false);
+  assert.equal(d.tap(1200, 105, 98), true);
+  assert.equal(d.tap(1300, 100, 100), false);   // el doble toque se consume
+  assert.equal(d.tap(1900, 100, 100), false);   // demasiado tarde
+  assert.equal(d.tap(2000, 300, 100), false);   // demasiado lejos
+});
+
+test('CAMERAS tiene etiqueta corta para el botón del HUD', () => {
+  const L = globalThis.R.rideLogic;
+  L.CAMERAS.forEach((c) => assert.ok(c.short && c.short.length <= 8));
+});
+
+test('createDoubleTap.reset descarta el toque pendiente (multitoque)', () => {
+  const d = globalThis.R.rideLogic.createDoubleTap(300, 30);
+  d.tap(1000, 10, 10);
+  d.reset();
+  assert.equal(d.tap(1100, 10, 10), false);
+});

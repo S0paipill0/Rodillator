@@ -22,6 +22,16 @@
   var CLUSTER_M = 2.5;              // m: ciclistas mas cerca que esto se reparten en el carril
   var KIND_COLORS = { user: 0xFF5A1F, ghost: 0xFFD23F, bot: 0x7FA7C9 };
   var CAMERA_MODES = ['persecucion', 'aerea', 'lateral'];
+  var BASE_FOV = 58, PORTRAIT_FOV = 70, PORTRAIT_ASPECT = 0.8, COMPACT_MAX_H = 500;
+
+  // Desplazamiento (x, y) para camera.setViewOffset(w, h, x, y, w, h) que lleva el centro optico
+  // al centro de la zona libre {top, bottom, left, right} (px CSS).
+  function viewOffsetFor(w, h, ins) {
+    var i = ins || {};
+    var t = Math.max(0, +i.top || 0), b = Math.max(0, +i.bottom || 0), l = Math.max(0, +i.left || 0), r = Math.max(0, +i.right || 0);
+    var cx = (l + (w - r)) / 2, cy = (t + (h - b)) / 2;
+    return { x: Math.round((w / 2 - cx) * 100) / 100 + 0, y: Math.round((h / 2 - cy) * 100) / 100 + 0 };
+  }
   var QUALITIES = ['auto', 'alta', 'media', 'baja'];
 
   /* ------------------------------------------------------------------ */
@@ -320,7 +330,7 @@
     container.appendChild(canvasEl);
 
     var scene = new T.Scene();
-    var camera = new T.PerspectiveCamera(58, 16 / 9, 0.5, 30000);
+    var camera = new T.PerspectiveCamera(BASE_FOV, 16 / 9, 0.5, 30000);
 
     /* ---- cielo, niebla, luces ---- */
     var HORIZON = 0xcfe3f2, ZENITH = 0x3f7fc4;
@@ -711,6 +721,7 @@
         st.token = token;
         st.distM = r.distM;
         var text = r.label != null ? String(r.label) : (r.name != null ? String(r.name) : '');
+        if (st.kind === 'ghost' && compactView()) text = 'PB';
         if (text !== st.labelText) drawLabel(st, text);
       }
       for (i = riderList.length - 1; i >= 0; i--) {
@@ -772,6 +783,11 @@
       } else if (cameraMode === 'lateral') {
         wantPos.set(px - hz * 9, py + 1.9, pz + hx * 9);           // 9 m a la derecha del rumbo
         wantLook.set(px + hx * 2, py + 1, pz + hz * 2);
+      } else if (compactView()) {
+        // vertical (celular): mas atras y mas alto, y mira casi al ciclista para que quede en el centro de la zona libre
+        wantPos.set(px - hx * 15, py + 6.5, pz - hz * 15);
+        pathAt(path, d + 6, _ahead);
+        wantLook.set(_ahead.x, _ahead.y + 1.2, _ahead.z);
       } else {
         wantPos.set(px - hx * 12, py + 5, pz - hz * 12);           // 12 m atras, 5 m arriba
         pathAt(path, d + 20, _ahead);                              // mira 20 m adelante
@@ -795,13 +811,30 @@
     }
 
     /* ---- tamano, calidad automatica ---- */
+    var viewInsets = { top: 0, bottom: 0, left: 0, right: 0 };
+    var viewW = 640, viewH = 360;
+    // Vista compacta (celular vertical u horizontal bajo): mismo criterio para camara, FOV y etiquetas.
+    function compactView() { return viewW / viewH < PORTRAIT_ASPECT || viewH <= COMPACT_MAX_H; }
+    function applyProjection() {
+      camera.aspect = viewW / viewH;
+      camera.fov = compactView() ? PORTRAIT_FOV : BASE_FOV;
+      var o = viewOffsetFor(viewW, viewH, viewInsets);
+      if (o.x !== 0 || o.y !== 0) camera.setViewOffset(viewW, viewH, o.x, o.y, viewW, viewH);
+      else camera.clearViewOffset();
+      camera.updateProjectionMatrix();
+    }
     function resize() {
       if (disposed) return;
-      var w = container.clientWidth || 640, h = container.clientHeight || 360;
+      viewW = container.clientWidth || 640; viewH = container.clientHeight || 360;
       renderer.setPixelRatio(pixelRatio);
-      renderer.setSize(w, h, false);
-      camera.aspect = w / h;
-      camera.updateProjectionMatrix();
+      renderer.setSize(viewW, viewH, false);
+      applyProjection();
+    }
+    // Margenes (px CSS) ocupados por el HUD: el centro optico se desplaza al centro de la zona libre.
+    function setViewInsets(ins) {
+      var i = ins || {};
+      viewInsets = { top: Math.max(0, +i.top || 0), bottom: Math.max(0, +i.bottom || 0), left: Math.max(0, +i.left || 0), right: Math.max(0, +i.right || 0) };
+      if (!disposed) applyProjection();
     }
     var ro = null;
     if (typeof ResizeObserver !== 'undefined') {
@@ -832,6 +865,14 @@
 
       var kr = 1 - Math.exp(-dt * 18), i, st;
       var cx = camera.position.x, cy = camera.position.y, cz = camera.position.z;
+      // vertical (celular): se evita el amontonamiento de etiquetas sobre el ciclista del usuario
+      var portrait = compactView(), uSt = userState(), nearBot = null, nearBotD = 1e9;
+      if (portrait && uSt) {
+        for (i = 0; i < riderList.length; i++) {
+          st = riderList[i];
+          if (st.kind === 'bot' && st.distM >= uSt.distM && st.distM - uSt.distM < nearBotD) { nearBot = st; nearBotD = st.distM - uSt.distM; }
+        }
+      }
       for (i = 0; i < riderList.length; i++) {
         st = riderList[i];
         var p = st.root.position;
@@ -856,6 +897,14 @@
         if (s < 1) s = 1;
         st.label.scale.set(st.labelW * s, st.labelW * s / 4, 1);
         st.label.position.y = 2.4 + 0.6 * (s - 1);
+        var vis = true;
+        if (portrait && uSt && st !== uSt) {
+          // vista compacta: solo el bot mas cercano por delante lleva etiqueta; el fantasma, un "PB" minimo
+          // el "PB" se oculta si el fantasma va pegado por detras: su etiqueta caeria sobre el ciclista
+          vis = st.kind === 'bot' ? st === nearBot : !(uSt.distM - st.distM >= 0 && uSt.distM - st.distM < 15);
+          if (vis) st.label.scale.multiplyScalar(st.kind === 'ghost' ? 0.55 : 0.7);
+        }
+        if (st.label.visible !== vis) st.label.visible = vis;
       }
       if (kindMats.ghost) kindMats.ghost.halo.opacity = 0.16 + 0.07 * Math.sin(simTime * 3);
 
@@ -885,7 +934,7 @@
       if (canvasEl.parentNode) canvasEl.parentNode.removeChild(canvasEl);
     }
 
-    return { setRiders: setRiders, setCameraMode: setCameraMode, render: render, resize: resize, dispose: dispose };
+    return { setRiders: setRiders, setCameraMode: setCameraMode, setViewInsets: setViewInsets, render: render, resize: resize, dispose: dispose };
   }
 
   R.Scene3D = {
@@ -902,7 +951,8 @@
       gridHeight: gridHeight,
       buildRoadPath: buildRoadPath,
       pathAt: pathAt,
-      pathPose: pathPose
+      pathPose: pathPose,
+      viewOffsetFor: viewOffsetFor
     }
   };
 })(typeof window !== 'undefined' ? (window.R = window.R || {}) : (globalThis.R = globalThis.R || {}));
