@@ -14,9 +14,8 @@ const EXPECTED = {
   'alpe-dhuez': { slope: [7, 9], km: [11, 15], synthetic: false },
   'farellones': { slope: [6, 8], synthetic: true },
   'caracoles-portillo': { slope: [6, 8], synthetic: true },
-  // El brief pide 3-6 %, pero sus coordenadas dan un descenso (inicio 3326 m, embalse 2474 m). Ver informe.
-  'el-yeso': { slope: [3, 6], synthetic: true, skipSlope: 'coordenadas del brief dan descenso de ~12 %' },
-  'talagante-valle': { slope: [0, 1.5], synthetic: true },
+  'el-yeso': { slope: [3, 6], synthetic: true },
+  'talagante-valle': { slope: [0, 1.5], km: [30, 36], synthetic: true },
 };
 
 function load(id) {
@@ -88,12 +87,23 @@ for (const id of Object.keys(EXPECTED)) {
     assert.ok(Math.abs(gain - r.gainM) < 1, `gain ${gain} vs ${r.gainM}`);
   });
 
-  test(`${id}: pendiente media y distancia`, { skip: exp.skipSlope }, () => {
+  test(`${id}: pendiente media y distancia`, () => {
     const { json: r } = load(id);
     const s = meanSlopePct(r);
     assert.ok(s >= exp.slope[0] && s <= exp.slope[1], `pendiente media ${s.toFixed(2)} % fuera de ${exp.slope}`);
     if (exp.km) assert.ok(r.distanceM / 1000 >= exp.km[0] && r.distanceM / 1000 <= exp.km[1], `distancia ${r.distanceM}`);
   });
+
+  if (exp.synthetic) {
+    test(`${id}: pendiente local p95 <= 12 %`, () => {
+      const p = load(id).json.points;
+      const g = [];
+      for (let i = 1; i < p.length; i++) g.push(Math.abs(p[i][2] - p[i - 1][2]) / (p[i][3] - p[i - 1][3]) * 100);
+      g.sort((a, b) => a - b);
+      const p95 = g[Math.floor(0.95 * (g.length - 1))];
+      assert.ok(p95 <= 12, `p95 de pendiente local ${p95.toFixed(1)} %`);
+    });
+  }
 
   test(`${id}: terreno (grilla, textura, bbox) y coherencia con la ruta`, () => {
     const { json: r } = load(id);

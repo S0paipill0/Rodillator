@@ -22,15 +22,20 @@ import math
 import os
 import re
 import sys
+import heapq
 import time
 import urllib.request
 
 import numpy as np
 import tifffile
 from PIL import Image, ImageDraw
-from scipy.ndimage import gaussian_filter, gaussian_filter1d, map_coordinates, uniform_filter1d
+from scipy.ndimage import (binary_dilation, convolve, gaussian_filter, gaussian_filter1d, map_coordinates,
+                           maximum_filter, uniform_filter1d)
 from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import dijkstra
+from skimage.filters import apply_hysteresis_threshold
+from skimage.measure import label
+from skimage.morphology import skeletonize
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CACHE = os.path.join(ROOT, "cache")
@@ -41,6 +46,7 @@ EARTH_R = 6371000.0
 M_PER_DEG = math.pi / 180.0 * EARTH_R
 STEP_M = 20.0
 SMOOTH_WINDOW_PTS = 5            # 5 puntos x 20 m = 100 m
+SYNTH_WINDOW_PTS = 7             # rutas sintéticas: 140 m; las curvas cerradas del trazado necesitan algo más de suavizado
 GRID = 256
 MAX_TEXTURE_PX = 2048
 MIN_TEXTURE_PX = 1024
@@ -53,10 +59,15 @@ TILE_URL = "https://tiles.maps.eox.at/wmts/1.0.0/s2cloudless-2020_3857/default/g
 ATTRIBUTION = "Copernicus DEM GLO-30 © ESA/DLR; Sentinel-2 cloudless by EOX (CC BY-NC-SA 4.0)"
 
 # Parámetros del camino de mínimo costo (rutas sintéticas).
-COST_FLAT_SLOPE = 0.07   # sobre esta pendiente comienza la penalización
-COST_K = 60.0           # fuerza de la penalización cuadrática
-PATH_SMOOTH_M = 15.0     # sigma del suavizado gaussiano del trazado sintético
-COST_DESCENT = 4.0       # penaliza bajar (el camino es de subida; evita ir y venir por quebradas)
+# costo de una arista = dist * (1 + pendiente + descenso) * (1 - ROAD_GAIN * camino)
+SLOPE_SOFT, SLOPE_K = 0.08, 150.0          # penalización cuadrática sobre 8 %
+SLOPE_STRONG, SLOPE_STRONG_K = 0.10, 3000.0  # penalización fuerte sobre 10 %
+SLOPE_MAX, SLOPE_MAX_K = 0.11, 1.0e4       # tope duro (prohibitivo); 11 % da margen para que el p95 del perfil quede <= 12 %
+DESCENT_K = 4.0          # penaliza bajar (el camino es de subida; evita ir y venir por quebradas)
+ROAD_GAIN = 0.8          # un píxel con "parecido a camino" = 1 abarata el costo hasta 80 %
+DEM_SMOOTH_M = 30.0      # suavizado del DEM usado para el costo (el DSM de 30 m es ruidoso)
+PATH_SMOOTH_M = 10.0     # sigma del suavizado gaussiano del trazado (ligero, para conservar las curvas)
+ROAD_ZOOM = 14
 
 ROUTES = [
     dict(id="alpe-dhuez", name="Alpe d'Huez", region="Isère", country="Francia", synthetic=False,
@@ -66,21 +77,23 @@ ROUTES = [
          source="Traza GPS de Strava incluida en el paquete R rayshaderanimate (GPL>=2); elevación Copernicus DEM "
                 "GLO-30 © ESA/DLR; imagen Sentinel-2 cloudless by EOX (CC BY-NC-SA 4.0)"),
     dict(id="farellones", name="Camino a Farellones", region="Región Metropolitana", country="Chile", synthetic=True,
-         waypoints=[(-33.3640, -70.4560), (-33.3540, -70.3080)],
+         waypoints=[(-33.3640, -70.4560), (-33.3540, -70.3080)], grid_m=20, climb=True, slopes=(0.09, 0.105),   # umbrales de pendiente algo más altos: con los de defecto la ruta quedaba en ~5 %
          description="Ascenso desde el sector La Ermita hasta Farellones por la cordillera de Santiago. "
                      "El trazado es aproximado, generado sobre el relieve real."),
     dict(id="caracoles-portillo", name="Caracoles de Portillo", region="Valparaíso", country="Chile", synthetic=True,
-         waypoints=[(-32.8780, -70.1500), (-32.8360, -70.1290)],
-         cost_k=10.0, flat_slope=0.10,   # terreno muy empinado: con la penalización por defecto el trazado se alarga demasiado
+         waypoints=[(-32.8780, -70.1500), (-32.8360, -70.1290)], grid_m=15, climb=True, slopes=(0.07, 0.09),
          description="Los famosos caracoles de la ruta internacional hacia Portillo, desde las cercanías de Juncal. "
                      "El trazado es aproximado, generado sobre el relieve real."),
     dict(id="el-yeso", name="Embalse El Yeso", region="Cajón del Maipo", country="Chile", synthetic=True,
-         waypoints=[(-33.6380, -70.1080), (-33.6760, -70.0880)],
+         # El inicio no es el punto del brief (estaba a 3326 m, en la cordillera): se deduce con el DEM siguiendo el
+         # valle del río Yeso aguas abajo desde el embalse hasta ~1350 m.
+         flow_origin=(-33.6760, -70.0880), flow_start_ele=1350.0, grid_m=30, climb=True,
          description="Camino de montaña por el Cajón del Maipo desde San Gabriel hasta el embalse El Yeso. "
                      "El trazado es aproximado, generado sobre el relieve real."),
     dict(id="talagante-valle", name="Valle de Talagante", region="Región Metropolitana", country="Chile",
          synthetic=True,
          waypoints=[(-33.6650, -70.9280), (-33.7520, -70.8970), (-33.6800, -71.0170), (-33.6650, -70.9280)],
+         grid_m=30, road_gain=0.4,   # terreno llano: con más ganancia el trazado se alarga siguiendo cada camino de parcela
          description="Circuito llano por el valle: Talagante, Isla de Maipo, El Monte y de vuelta a Talagante. "
                      "El trazado es aproximado, generado sobre el relieve real."),
 ]
@@ -192,76 +205,158 @@ def smooth_path(x, y, sigma_m):
     return x * (1 - w) + xs * w, y * (1 - w) + ys * w
 
 
+# ---------------------------------------------------------------- "parecido a camino" desde la imagen
+def line_kernels(n_orient=12, half=7, flank=3.5, sigma=0.9):
+    """Núcleos de línea orientados: línea central menos las dos líneas laterales (realce de líneas claras finas)."""
+    yy, xx = np.mgrid[-half:half + 1, -half:half + 1].astype(np.float32)
+    kernels = []
+    for k in range(n_orient):
+        th = math.pi * k / n_orient
+        u = xx * math.cos(th) + yy * math.sin(th)
+        v = -xx * math.sin(th) + yy * math.cos(th)
+        along = np.abs(u) <= half - 0.5
+        center = np.exp(-v ** 2 / (2 * sigma ** 2)) * along
+        side = np.exp(-(np.abs(v) - flank) ** 2 / (2 * sigma ** 2)) * along
+        kernels.append(center / center.sum() - side / side.sum())
+    return kernels
+
+
+def road_likeness(rgb):
+    """rgb float32 HxWx3 en [0,1] -> HxW en [0,1]. Alto = línea clara fina, continua y en zona lisa (camino).
+
+    La respuesta de línea se divide por el contraste local (así los bordes de sombra y roca, de contraste alto,
+    se atenúan y los caminos, de poco contraste pero lisos, destacan); luego se conservan solo los trazos largos.
+    """
+    lum = rgb.mean(axis=2)
+    top = lum - gaussian_filter(lum, 5)
+    resp = np.max([convolve(top, k, mode="nearest") for k in line_kernels()], axis=0).clip(0)
+    resp = resp / (gaussian_filter(np.abs(top), 12) + 0.004)
+    resp = np.clip(resp / np.percentile(resp, 99.5), 0, 1)
+    smooth = gaussian_filter(resp, 0.7)
+    mask = apply_hysteresis_threshold(smooth, np.percentile(smooth, 92), np.percentile(smooth, 98))
+    skel = skeletonize(mask)
+    lab = label(skel, connectivity=2)
+    sizes = np.bincount(lab.ravel())
+    keep = sizes >= 50
+    keep[0] = False
+    long_traces = binary_dilation(keep[lab], iterations=1)
+    return np.maximum(long_traces.astype(np.float32), 0.3 * resp)
+
+
+def road_on_grid(lon, lat, grid_m):
+    """Muestrea road_likeness sobre una grilla de puntos lon/lat (misma forma). Dilata a la huella de la celda."""
+    bbox = [float(lon.min()), float(lat.min()), float(lon.max()), float(lat.max())]
+    mos, z, tx0, ty0 = load_mosaic(bbox, ROAD_ZOOM)
+    road = road_likeness(np.asarray(mos, dtype=np.float32) / 255.0)
+    foot = int(round(grid_m / 9.0))                  # ~9 m por píxel de la imagen a z14
+    if foot > 1:
+        road = maximum_filter(road, size=foot)
+    px, py = merc_px(lon, lat, z)
+    return map_coordinates(road, [py - ty0 * 256 - 0.5, px - tx0 * 256 - 0.5], order=1, mode="nearest")
+
+
 # ---------------------------------------------------------------- camino de mínimo costo
 OFFSETS = [(di, dj) for di in range(-2, 3) for dj in range(-2, 3)
            if (di, dj) != (0, 0) and math.gcd(abs(di), abs(dj)) == 1]   # 16 vecinos
 
 
-def least_cost_path(dem, p_from, p_to, pad_m=3000.0, k=COST_K, flat_slope=COST_FLAT_SLOPE):
-    """Dijkstra sobre la grilla DEM con costo = d*(1 + k*max(0,|s|-s0)^2 + kd*max(0,-s)). p = (lat, lon)."""
-    lats = [p_from[0], p_to[0]]
-    lons = [p_from[1], p_to[1]]
-    lat0 = float(np.mean(lats))
-    ext = max(abs(lats[0] - lats[1]) * M_PER_DEG, abs(lons[0] - lons[1]) * M_PER_DEG * math.cos(math.radians(lat0)))
-    pad = pad_m + 0.25 * ext
-    pad_lat = pad / M_PER_DEG
-    pad_lon = pad / (M_PER_DEG * math.cos(math.radians(lat0)))
-    r_lo, c_lo = dem.pix(min(lons) - pad_lon, max(lats) + pad_lat)
-    r_hi, c_hi = dem.pix(max(lons) + pad_lon, min(lats) - pad_lat)
-    r_lo, c_lo = max(0, int(r_lo)), max(0, int(c_lo))
-    r_hi, c_hi = min(dem.arr.shape[0] - 1, int(r_hi) + 1), min(dem.arr.shape[1] - 1, int(c_hi) + 1)
-    z = gaussian_filter(dem.arr[r_lo:r_hi + 1, c_lo:c_hi + 1].astype(np.float64), 1.0)
-    h, w = z.shape
-    dy = M_PER_DEG / dem.PER_DEG
-    dx = dy * math.cos(math.radians(lat0))
+def slope_multiplier(s, soft=SLOPE_SOFT, strong=SLOPE_STRONG):
+    a = np.abs(s)
+    return (1.0 + SLOPE_K * np.maximum(0.0, a - soft) ** 2
+            + SLOPE_STRONG_K * np.maximum(0.0, a - strong)
+            + SLOPE_MAX_K * (a > SLOPE_MAX)
+            + DESCENT_K * np.maximum(0.0, -s))
+
+
+def least_cost_path(dem, p_from, p_to, grid_m, slopes=(SLOPE_SOFT, SLOPE_STRONG), road_gain=ROAD_GAIN):
+    """Dijkstra sobre una grilla métrica local (paso grid_m). p = (lat, lon). Devuelve lon, lat."""
+    lat0, lon0 = (p_from[0] + p_to[0]) / 2, (p_from[1] + p_to[1]) / 2
+    xa, ya = to_xy(p_from[1], p_from[0], lon0, lat0)
+    xb, yb = to_xy(p_to[1], p_to[0], lon0, lat0)
+    pad = max(2500.0, 0.2 * max(abs(xa - xb), abs(ya - yb)))
+    xmin, xmax = min(xa, xb) - pad, max(xa, xb) + pad
+    ymin, ymax = min(ya, yb) - pad, max(ya, yb) + pad
+    w, h = int((xmax - xmin) / grid_m) + 1, int((ymax - ymin) / grid_m) + 1
+    gx, gy = xmin + grid_m * np.arange(w), ymax - grid_m * np.arange(h)
+    lon, lat = from_xy(*np.meshgrid(gx, gy), lon0, lat0)
+    z = gaussian_filter(dem.sample(lon.ravel(), lat.ravel()).reshape(h, w).astype(np.float64), DEM_SMOOTH_M / grid_m)
+    road = road_on_grid(lon, lat, grid_m)
+
     idx = np.arange(h * w).reshape(h, w)
     rows, cols, costs = [], [], []
     for di, dj in OFFSETS:
-        a = idx[max(0, -di):h - max(0, di), max(0, -dj):w - max(0, dj)]
-        b = idx[max(0, di):h - max(0, -di), max(0, dj):w - max(0, -dj)]
-        za = z[max(0, -di):h - max(0, di), max(0, -dj):w - max(0, dj)]
-        zb = z[max(0, di):h - max(0, -di), max(0, dj):w - max(0, -dj)]
-        dist = math.hypot(di * dy, dj * dx)
-        s = (zb - za) / dist
-        c = dist * (1.0 + k * np.maximum(0.0, np.abs(s) - flat_slope) ** 2
-                    + COST_DESCENT * np.maximum(0.0, -s))
-        rows.append(a.ravel()); cols.append(b.ravel()); costs.append(c.ravel())
-    g = csr_matrix((np.concatenate(costs), (np.concatenate(rows), np.concatenate(cols))), shape=(h * w, h * w))
+        sa = (slice(max(0, -di), h - max(0, di)), slice(max(0, -dj), w - max(0, dj)))
+        sb = (slice(max(0, di), h - max(0, -di)), slice(max(0, dj), w - max(0, -dj)))
+        dist = math.hypot(di, dj) * grid_m
+        s = (z[sb] - z[sa]) / dist
+        c = dist * slope_multiplier(s, *slopes) * (1.0 - road_gain * road[sb])
+        rows.append(idx[sa].ravel()); cols.append(idx[sb].ravel()); costs.append(c.ravel())
+    graph = csr_matrix((np.concatenate(costs), (np.concatenate(rows), np.concatenate(cols))), shape=(h * w, h * w))
 
-    def node(p):
-        r, c = dem.pix(p[1], p[0])
-        return int(round(float(r))) - r_lo, int(round(float(c))) - c_lo
+    def node(x, y):
+        return int(round((ymax - y) / grid_m)) * w + int(round((x - xmin) / grid_m))
 
-    (ra, ca), (rb, cb) = node(p_from), node(p_to)
-    for rr, cc in ((ra, ca), (rb, cb)):
-        if not (0 <= rr < h and 0 <= cc < w):
-            raise RuntimeError("punto fuera de la ventana de búsqueda")
-    src, dst = ra * w + ca, rb * w + cb
-    _, pred = dijkstra(g, directed=True, indices=src, return_predecessors=True)
+    src, dst = node(xa, ya), node(xb, yb)
+    _, pred = dijkstra(graph, directed=True, indices=src, return_predecessors=True)
     if pred[dst] < 0 and dst != src:
         raise RuntimeError("sin camino")
     chain = [dst]
     while chain[-1] != src:
         chain.append(pred[chain[-1]])
     chain = np.array(chain[::-1])
-    rr, cc = chain // w + r_lo, chain % w + c_lo
-    lon = (cc + 0.5 + dem.c0) / dem.PER_DEG - 180.0
-    lat = 90.0 - (rr + 0.5 + dem.r0) / dem.PER_DEG
-    lon[0], lat[0] = p_from[1], p_from[0]
-    lon[-1], lat[-1] = p_to[1], p_to[0]
-    return lon, lat
+    x, y = gx[chain % w], gy[chain // w]
+    x[0], y[0], x[-1], y[-1] = xa, ya, xb, yb
+    return from_xy(x, y, lon0, lat0)
 
 
-def synthetic_track(waypoints, dem, **cost):
+def synthetic_track(waypoints, dem, grid_m, slopes=(SLOPE_SOFT, SLOPE_STRONG), road_gain=ROAD_GAIN):
     lons, lats = [], []
     for a, b in zip(waypoints[:-1], waypoints[1:]):
-        lo, la = least_cost_path(dem, a, b, **cost)
+        lo, la = least_cost_path(dem, a, b, grid_m, slopes, road_gain)
         lons.append(lo if not lons else lo[1:]); lats.append(la if not lats else la[1:])
     lon, lat = np.concatenate(lons), np.concatenate(lats)
     lon0, lat0 = float(lon.mean()), float(lat.mean())
     x, y = to_xy(lon, lat, lon0, lat0)
     x, y = smooth_path(x, y, PATH_SMOOTH_M)
     return from_xy(x, y, lon0, lat0)
+
+
+def valley_start(dem, origin, target_ele):
+    """Sigue el valle aguas abajo desde origin=(lat, lon) (descenso más pronunciado D8 sobre el DEM suavizado,
+    con inundación por prioridad en pozos y planos) hasta bajar de target_ele. Devuelve (lat, lon)."""
+    z = gaussian_filter(dem.arr.astype(np.float64), 1.5)
+    h, w = z.shape
+    r, c = [int(round(float(v))) for v in dem.pix(origin[1], origin[0])]
+    n8 = [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)]
+    seen = {(r, c)}
+    while z[r, c] > target_ele:
+        best, best_s = None, 0.0
+        for di, dj in n8:
+            v = (r + di, c + dj)
+            if 0 <= v[0] < h and 0 <= v[1] < w and v not in seen:
+                sl = (z[r, c] - z[v]) / math.hypot(di, dj)
+                if sl > best_s:
+                    best, best_s = v, sl
+        if best is None:                       # pozo o plano: inundación por prioridad hasta el punto de derrame
+            queue, parent, found = [(z[r, c], r, c)], {(r, c): None}, None
+            while queue and found is None:
+                _, ur, uc = heapq.heappop(queue)
+                for di, dj in n8:
+                    v = (ur + di, uc + dj)
+                    if 0 <= v[0] < h and 0 <= v[1] < w and v not in parent and v not in seen:
+                        parent[v] = (ur, uc)
+                        if z[v] < z[r, c] - 1.0:
+                            found = v
+                            break
+                        heapq.heappush(queue, (z[v], v[0], v[1]))
+            if found is None:
+                raise RuntimeError("el valle no baja de %.0f m dentro de la ventana DEM" % target_ele)
+            best = found
+        seen.add(best)
+        r, c = best
+    lon = (c + 0.5 + dem.c0) / dem.PER_DEG - 180.0
+    lat = 90.0 - (r + 0.5 + dem.r0) / dem.PER_DEG
+    return (lat, lon)
 
 
 # ---------------------------------------------------------------- traza real (GPX)
@@ -283,13 +378,14 @@ def gpx_climb():
 
 
 # ---------------------------------------------------------------- perfil
-def build_points(lon, lat, dem):
+def build_points(lon, lat, dem, dem_sigma_px=0.0, window_pts=SMOOTH_WINDOW_PTS):
     lon0, lat0 = float(np.mean(lon)), float(np.mean(lat))
     x, y = to_xy(lon, lat, lon0, lat0)
     x, y, dist = resample_polyline(x, y, STEP_M)
     lo, la = from_xy(x, y, lon0, lat0)
     # se redondea aquí (1 decimal) para que gainM/minEleM/maxEleM coincidan exactamente con los puntos escritos
-    ele = np.round(uniform_filter1d(dem.sample(lo, la), SMOOTH_WINDOW_PTS, mode="nearest"), 1)
+    arr = gaussian_filter(dem.arr, dem_sigma_px) if dem_sigma_px else None
+    ele = np.round(uniform_filter1d(dem.sample(lo, la, arr=arr), window_pts, mode="nearest"), 1)
     return lo, la, ele, dist
 
 
@@ -336,14 +432,10 @@ def tile_range(bbox, z):
     return int(x0 // 256), int(y0 // 256), int(x1 // 256), int(y1 // 256)
 
 
-def satellite_texture(bbox, log=print):
-    z = 14
+def load_mosaic(bbox, z):
+    """Mosaico RGB (uint8) de las teselas z que cubren bbox. Devuelve (array, z, tx0, ty0)."""
     tx0, ty0, tx1, ty1 = tile_range(bbox, z)
-    if (tx1 - tx0 + 1) * (ty1 - ty0 + 1) > 144:
-        z = 13
-        tx0, ty0, tx1, ty1 = tile_range(bbox, z)
     nx, ny = tx1 - tx0 + 1, ty1 - ty0 + 1
-    log("  satélite z%d: %dx%d teselas" % (z, nx, ny))
     mosaic = Image.new("RGB", (nx * 256, ny * 256))
     for ty in range(ty0, ty1 + 1):
         for tx in range(tx0, tx1 + 1):
@@ -351,7 +443,18 @@ def satellite_texture(bbox, log=print):
             fetched = not os.path.exists(p)
             fetch_cached(TILE_URL.format(z=z, y=ty, x=tx), p, pause=0.15 if fetched else 0.0)
             mosaic.paste(Image.open(p).convert("RGB"), ((tx - tx0) * 256, (ty - ty0) * 256))
-    mos = np.asarray(mosaic, dtype=np.float32)
+    return np.asarray(mosaic), z, tx0, ty0
+
+
+def satellite_texture(bbox, log=print):
+    z = 14
+    tx0, ty0, tx1, ty1 = tile_range(bbox, z)
+    if (tx1 - tx0 + 1) * (ty1 - ty0 + 1) > 144:
+        z = 13
+        tx0, ty0, tx1, ty1 = tile_range(bbox, z)
+    log("  satélite z%d: %dx%d teselas" % (z, tx1 - tx0 + 1, ty1 - ty0 + 1))
+    mos, z, tx0, ty0 = load_mosaic(bbox, z)
+    mos = mos.astype(np.float32)
 
     min_lon, min_lat, max_lon, max_lat = bbox
     lat0 = (min_lat + max_lat) / 2
@@ -391,18 +494,28 @@ def write_preview(img, bbox, lon, lat, path):
 def bake(route, log=print):
     log("[%s]" % route["id"])
     if route["synthetic"]:
-        wl = [p[1] for p in route["waypoints"]]
-        wa = [p[0] for p in route["waypoints"]]
-        seed_bbox = bbox_with_margin(np.array(wl), np.array(wa))
-        pad = 0.05
-        seed_bbox = [seed_bbox[0] - pad, seed_bbox[1] - pad, seed_bbox[2] + pad, seed_bbox[3] + pad]
-        dem = Dem(seed_bbox)
-        lon, lat = synthetic_track(route["waypoints"], dem, k=route.get("cost_k", COST_K),
-                                   flat_slope=route.get("flat_slope", COST_FLAT_SLOPE))
+        wps = route.get("waypoints")
+        if wps is None:                      # el inicio se deduce del valle (ver valley_start)
+            o_lat, o_lon = route["flow_origin"]
+            dem = Dem([o_lon - 0.30, o_lat - 0.20, o_lon + 0.10, o_lat + 0.10], pad_deg=0.0)
+            start = valley_start(dem, route["flow_origin"], route["flow_start_ele"])
+            log("  inicio por flujo: lat %.4f lon %.4f" % start)
+            wps = [start, route["flow_origin"]]
+        else:
+            wl, wa = np.array([q[1] for q in wps]), np.array([q[0] for q in wps])
+            seed = bbox_with_margin(wl, wa)
+            pad = 0.05
+            dem = Dem([seed[0] - pad, seed[1] - pad, seed[2] + pad, seed[3] + pad])
+        lon, lat = synthetic_track(wps, dem, route["grid_m"], route.get("slopes", (SLOPE_SOFT, SLOPE_STRONG)),
+                                    route.get("road_gain", ROAD_GAIN))
+        if route.get("climb"):               # como en Alpe d'Huez: la subida parte del punto más bajo del trazado
+            i0 = int(np.argmin(gaussian_filter1d(dem.sample(lon, lat), 5.0)))
+            lon, lat = lon[i0:], lat[i0:]
     else:
         lon, lat = gpx_climb()
         dem = Dem(bbox_with_margin(lon, lat), pad_deg=0.02)
-    lo, la, ele, dist = build_points(lon, lat, dem)
+    # rutas sintéticas: el DEM se suaviza (1 px = 30 m) igual que en el costo, así el perfil respeta el tope de pendiente
+    lo, la, ele, dist = build_points(lon, lat, dem, *((1.0, SYNTH_WINDOW_PTS) if route["synthetic"] else (0.0, SMOOTH_WINDOW_PTS)))
     bbox = bbox_with_margin(lo, la)
     if not dem.covers(bbox):
         dem = Dem(bbox)
