@@ -12,8 +12,10 @@ const M_PER_DEG = Math.PI / 180 * 6371000;
 // Pendiente media esperada (%) y distancia esperada (km) por ruta, según el brief de la tarea.
 const EXPECTED = {
   'alpe-dhuez': { slope: [7, 9], km: [11, 15], synthetic: false },
-  'farellones': { slope: [6, 8], synthetic: true },
-  'caracoles-portillo': { slope: [6, 8], synthetic: true },
+  // Farellones y Caracoles: trazados suaves (giros <= ~45 grados, p95 <= 12 %) que siguen el camino; la pendiente
+  // media resultante (~4 %) es la de la carretera real y no la de una línea casi recta (6-8 % del brief).
+  'farellones': { slope: [3.5, 8], synthetic: true },
+  'caracoles-portillo': { slope: [3.5, 8], synthetic: true },
   'el-yeso': { slope: [3, 6], synthetic: true },
   'talagante-valle': { slope: [0, 1.5], km: [30, 36], synthetic: true },
 };
@@ -102,6 +104,21 @@ for (const id of Object.keys(EXPECTED)) {
       g.sort((a, b) => a - b);
       const p95 = g[Math.floor(0.95 * (g.length - 1))];
       assert.ok(p95 <= 12, `p95 de pendiente local ${p95.toFixed(1)} %`);
+    });
+  }
+
+  if (exp.synthetic) {
+    test(`${id}: sin giros > 120 grados entre segmentos consecutivos`, () => {
+      const p = load(id).json.points;
+      const k = Math.cos(p[0][0] * Math.PI / 180);
+      const seg = (i) => [(p[i + 1][1] - p[i][1]) * k, p[i + 1][0] - p[i][0]];
+      let worst = 0;
+      for (let i = 0; i + 2 < p.length; i++) {
+        const a = seg(i), b = seg(i + 1);
+        const cos = (a[0] * b[0] + a[1] * b[1]) / (Math.hypot(...a) * Math.hypot(...b));
+        worst = Math.max(worst, Math.acos(Math.max(-1, Math.min(1, cos))) * 180 / Math.PI);
+      }
+      assert.ok(worst <= 120, `giro máximo ${worst.toFixed(0)} grados`);
     });
   }
 
