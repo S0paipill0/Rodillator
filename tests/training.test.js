@@ -219,21 +219,45 @@ test('suggestFtpUpdate: 75 % del mejor minuto de un ramp-test', () => {
   assert.equal(T.suggestFtpUpdate([b], { ftp: 200 }, { today: '2026-03-10' }), null);
 });
 
+test('suggestFtpUpdate: un rodaje no máximo nunca baja el FTP', () => {
+  const easy = act('2026-03-05', { workoutId: 'resistencia-60', bestEfforts: { '1200': 120, '60': 150 } });
+  assert.equal(T.suggestFtpUpdate([easy], { ftp: 200 }, { today: '2026-03-10' }), null);
+  // un test sí puede bajarlo
+  const test20 = act('2026-03-05', { workoutId: 'ftp-20', bestEfforts: { '1200': 180 } });
+  assert.equal(T.suggestFtpUpdate([test20], { ftp: 200 }, { today: '2026-03-10' }).suggestedFtp, 171);
+  const ramp = act('2026-03-05', { workoutId: 'ramp-test', bestEfforts: { '60': 240 } });
+  assert.equal(T.suggestFtpUpdate([ramp], { ftp: 200 }, { today: '2026-03-10' }).suggestedFtp, 180);
+  // un rodaje fuerte que sube el FTP sí cuenta
+  const hard = act('2026-03-05', { workoutId: 'umbral-2x20', bestEfforts: { '1200': 240 } });
+  assert.equal(T.suggestFtpUpdate([hard], { ftp: 200 }, { today: '2026-03-10' }).suggestedFtp, 228);
+});
+
+test('suggestFtpUpdate: elige el mejor candidato, no el más reciente', () => {
+  const best = act('2026-03-01', { id: 'b', workoutId: 'ftp-20', bestEfforts: { '1200': 260 } });
+  const recent = act('2026-03-08', { id: 'r', workoutId: 'ftp-20', bestEfforts: { '1200': 230 } });
+  assert.equal(T.suggestFtpUpdate([best, recent], { ftp: 200 }, { today: '2026-03-10' }).suggestedFtp, 247);
+});
+
 // ---------- plan ----------
-test('buildPlan: estructura, semanas por defecto y progresión de TSS', () => {
+test('buildPlan: estructura, semanas por defecto y progresión de TSS por bloque', () => {
   const p = T.buildPlan({ profile: { ...baseProfile, weeks: undefined }, startDate: '2026-03-02' });
   assert.equal(p.goal, 'ftp');
   assert.equal(p.weeks.length, 8);
   assert.deepEqual(p.weeks.map((w) => w.index), [1, 2, 3, 4, 5, 6, 7, 8]);
   const t = p.weeks.map((w) => w.targetTss);
   const close = (a, b) => assert.ok(Math.abs(a - b) < 0.1, `${a} vs ${b}`);
-  close(t[0], 5 * 55);
-  close(t[1], t[0] * 1.08);
-  close(t[2], t[1] * 1.08);
+  const t0 = 5 * 55;
+  close(t[0], t0);
+  close(t[1], t0 * 1.08);
+  close(t[2], t0 * 1.08 * 1.08);
   assert.equal(p.weeks[3].phase, 'descarga');
   close(t[3], t[2] * 0.6);
-  close(t[4], t[2] * 1.08);
+  // el bloque 2 se reinicia: inicio x 1.05, luego +8 % por semana
+  close(t[4], t0 * 1.05);
+  close(t[5], t0 * 1.05 * 1.08);
+  close(t[6], t0 * 1.05 * 1.08 * 1.08);
   assert.equal(p.weeks[7].phase, 'descarga');
+  close(t[7], t[6] * 0.6);
   for (const w of p.weeks) {
     assert.equal(w.days.length, 7);
     assert.ok(w.days.every((d) => d.status === 'pendiente' && /^\d{4}-\d{2}-\d{2}$/.test(d.date)));
@@ -244,8 +268,59 @@ test('buildPlan: estructura, semanas por defecto y progresión de TSS', () => {
   assert.equal(p.weeks[4].phase, 'construccion');
 });
 
+test('buildPlan: targetTss con topes (x1.6 del inicial y realizable por horas)', () => {
+  const p = T.buildPlan({ profile: { ...baseProfile, weeks: 24 }, startDate: '2026-03-02' });
+  const t0 = 5 * 55;
+  for (const w of p.weeks) {
+    assert.ok(w.targetTss <= 4 * 85 + 0.1, `w${w.index} ${w.targetTss}`);
+    assert.ok(w.targetTss <= t0 * 1.6 + 0.1, `w${w.index} ${w.targetTss}`);
+    assert.ok(w.targetTss <= 5 * 1.1 * 72 + 0.1, `w${w.index} ${w.targetTss}`);
+  }
+  assert.ok(p.weeks[22].targetTss < 5 * 1.1 * 72 + 0.1);
+  const q = T.buildPlan({ profile: { ...baseProfile, hoursPerWeek: 4, level: 'competitivo', goal: 'gran-fondo', weeks: 24 }, startDate: '2026-03-02' });
+  q.weeks.forEach((w) => assert.ok(w.targetTss <= 4 * 1.1 * 72 + 0.1));
+});
+
+test('buildPlan: el TSS real persigue targetTss (+-25 %) y crece entre bloques', () => {
+  const tssOf = (w) => w.days.filter((d) => d.workoutId).reduce((s, d) => s + T.getWorkout(d.workoutId).tss, 0);
+  for (const goal of ['forma', 'ftp', 'evento']) {
+    for (const hoursPerWeek of [5, 6, 8]) {
+      const profile = { ...baseProfile, goal, hoursPerWeek, daysPerWeek: 4, weeks: 12, ftpEstimated: true, eventDate: goal === 'evento' ? '2026-05-24' : null };
+      const p = T.buildPlan({ profile, startDate: '2026-03-02' });
+      p.weeks.forEach((w) => {
+        const real = tssOf(w);
+        assert.ok(Math.abs(real - w.targetTss) / w.targetTss <= 0.25, `${goal}/${hoursPerWeek}h w${w.index} real=${real} target=${w.targetTss}`);
+      });
+      const mean = (a, b) => p.weeks.slice(a, b).reduce((s, w) => s + tssOf(w), 0) / (b - a);
+      if (hoursPerWeek <= 5) assert.ok(mean(4, 7) > mean(0, 3), `${goal}/${hoursPerWeek}h: ${mean(4, 7)} vs ${mean(0, 3)}`);
+    }
+  }
+});
+
+test('buildPlan: las semanas de descarga no repiten siempre los mismos workouts', () => {
+  const p = T.buildPlan({ profile: { ...baseProfile, weeks: 12 }, startDate: '2026-03-02' });
+  const sets = p.weeks.filter((w) => w.phase === 'descarga').map((w) => w.days.filter((d) => d.workoutId).map((d) => d.workoutId).sort().join(','));
+  assert.equal(sets.length, 3);
+  assert.ok(new Set(sets).size >= 2, sets.join(' | '));
+  assert.notEqual(sets[0], sets[1]);
+});
+
+test('buildPlan: gran-fondo con eventDate se comporta como evento (semanas + taper)', () => {
+  const p = T.buildPlan({ profile: { ...baseProfile, goal: 'gran-fondo', eventDate: '2026-05-24', weeks: 8 }, startDate: '2026-03-02' });
+  assert.equal(p.weeks.length, 12);
+  assert.equal(p.weeks[11].phase, 'taper');
+  assert.equal(p.weeks[8].phase, 'especifico');
+});
+
+test('buildPlan/estimateFtp: validan entradas con errores en español', () => {
+  assert.throws(() => T.buildPlan({ profile: baseProfile }), /startDate/);
+  assert.throws(() => T.buildPlan({ profile: baseProfile, startDate: '02/03/2026' }), /startDate/);
+  assert.throws(() => T.estimateFtp({ age: 40, level: 'intermedio' }), /weightKg/);
+  assert.throws(() => T.estimateFtp({ weightKg: 0, age: 40 }), /weightKg/);
+});
+
 test('buildPlan: multiplicadores por objetivo y nivel principiante', () => {
-  const mk = (goal, level) => T.buildPlan({ profile: { ...baseProfile, goal, level, hoursPerWeek: 6 }, startDate: '2026-03-02' }).weeks[0].targetTss;
+  const mk = (goal, level) => T.buildPlan({ profile: { ...baseProfile, goal, level, hoursPerWeek: 6, daysPerWeek: 7 }, startDate: '2026-03-02' }).weeks[0].targetTss;
   assert.ok(Math.abs(mk('forma', 'intermedio') - 300) < 0.1);
   assert.ok(Math.abs(mk('peso', 'intermedio') - 300) < 0.1);
   assert.ok(Math.abs(mk('ftp', 'intermedio') - 330) < 0.1);
@@ -377,6 +452,13 @@ test('adaptPlan: RPE >= 9 en dos sesiones de la última semana baja la próxima 
   assert.equal(dayOf(plan, '2026-03-05').workoutId, 'umbral-2x20', 'entrada intacta');
 });
 
+test('adaptPlan: lastAdaptation vuelve a null si esta pasada no adapta', () => {
+  const plan = handPlan();
+  plan.lastAdaptation = { date: '2026-02-01', reason: 'antigua' };
+  const out = T.adaptPlan(plan, [], baseProfile, { today: '2026-03-04' });
+  assert.equal(out.lastAdaptation, null);
+});
+
 test('adaptPlan: un solo RPE alto no dispara la reducción', () => {
   const acts = [act('2026-03-03', { workoutId: 'sweetspot-3x12', rpe: 10, tss: 60 })];
   const out = T.adaptPlan(handPlan(), acts, baseProfile, { today: '2026-03-04' });
@@ -413,6 +495,23 @@ test('adaptPlan: RPE <= 4 en las dos últimas intensas y TSB > -10 sube de nivel
   assert.ok(expected);
   assert.equal(dayOf(out, '2026-03-05').workoutId, expected.id);
   assert.ok(out.lastAdaptation && /\S/.test(out.lastAdaptation.reason));
+});
+
+test('adaptPlan: el reemplazo al subir de nivel dura como máximo 1.1x el original', () => {
+  const acts = [
+    act('2026-02-20', { workoutId: 'umbral-3x10', rpe: 4, tss: 40 }),
+    act('2026-02-24', { workoutId: 'vo2-5x4', rpe: 3, tss: 40 }),
+  ];
+  let changed = 0;
+  for (const w of T.library.filter((x) => x.category !== 'test')) {
+    const plan = handPlan();
+    plan.weeks[0].days[3].workoutId = w.id;
+    const out = T.adaptPlan(plan, acts, baseProfile, { today: '2026-03-04' });
+    const rep = T.getWorkout(dayOf(out, '2026-03-05').workoutId);
+    assert.ok(rep.durationS <= w.durationS * 1.1 + 1e-9, `${w.id} -> ${rep.id}`);
+    if (rep.id !== w.id) { changed++; assert.equal(rep.category, w.category); assert.ok(rep.tss > w.tss); }
+  }
+  assert.ok(changed > 5);
 });
 
 test('adaptPlan: una de las dos intensas con RPE alto impide subir de nivel', () => {
@@ -495,4 +594,25 @@ test('motivation: menciona próxima sesión y récord reciente', () => {
   const all = [...texts].join(' | ');
   assert.ok(/récord|record/i.test(all), all);
   assert.ok(/próxima sesión/i.test(all), all);
+});
+
+test('motivation: antepone el nombre y siempre empieza en mayúscula', () => {
+  const upper = (t) => t[0] !== t[0].toLowerCase();
+  const scenarios = [
+    { activities: [], plan: null },
+    { activities: [act('2026-03-09'), act('2026-03-10')], plan: handPlan() },
+    { activities: [act('2026-03-10', { bestEfforts: { '300': 400 } }), act('2026-02-01', { bestEfforts: { '300': 300 } })], plan: handPlan() },
+  ];
+  for (const sc of scenarios) {
+    for (let i = 1; i <= 28; i++) {
+      const today = `2026-03-${String(i).padStart(2, '0')}`;
+      const named = T.motivation({ profile: { name: 'Ana' }, ...sc, today });
+      assert.ok(named.includes('Ana'), named);
+      assert.ok(named.startsWith('Ana'), named);
+      const anon = T.motivation({ profile: {}, ...sc, today });
+      assert.ok(upper(anon), anon);
+      assert.ok(!anon.includes('undefined'));
+    }
+  }
+  assert.ok(upper(T.motivation({ profile: { name: 'ana' }, activities: [], plan: null, today: '2026-03-10' })));
 });

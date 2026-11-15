@@ -39,6 +39,7 @@
   const LEVEL_WKG = { principiante: 2.0, intermedio: 2.8, avanzado: 3.5, competitivo: 4.2 };
 
   function estimateFtp(o) {
+    if (!o || !(Number(o.weightKg) > 0)) throw new Error('Falta el peso (weightKg) para estimar el FTP.');
     const base = LEVEL_WKG[o.level] != null ? LEVEL_WKG[o.level] : LEVEL_WKG.intermedio;
     const factor = Math.max(0.6, 1 - 0.005 * Math.max(0, (o.age || 0) - 35));
     const ftp = Math.round(base * o.weightKg * factor);
@@ -281,13 +282,13 @@
   const SLOT_W = [1, 1, 1.8, 0.7, 0.7, 0.8, 0.5];
   const UNLOAD = 0.6; // descarga y taper: -40 %
 
-  function phaseFor(i, total, taper, goal) {
+  function phaseFor(i, total, taper, event) {
     if (taper && i === total) return 'taper';
     if (i % 4 === 0) return 'descarga';
     const m = taper ? total - 1 : total;
     const blocks = Math.ceil(m / 4);
     const k = Math.floor((i - 1) / 4);
-    if (goal === 'evento') {
+    if (event) {
       if (k === blocks - 1) return 'especifico';
       return k === 0 ? 'base' : 'construccion';
     }
@@ -318,23 +319,15 @@
   }
 
   const poolFor = (cats) => library.filter((w) => cats.indexOf(w.category) >= 0);
-  const MIN_SESSION_S = 1800; // sesión más corta disponible (Recuperación 30)
 
-  function pickWorkout(cats, maxDur, desDur, desTss, avoid) {
-    let cand = poolFor(cats).filter((w) => w.durationS <= maxDur);
-    if (!cand.length) {
-      // no cabe: alternativa suave que sí quepa; si ni así, la más corta (se prioriza respetar los días por semana)
-      cand = poolFor(['recuperacion', 'resistencia', 'tempo']).filter((w) => w.durationS <= maxDur);
-      if (!cand.length) cand = [byId['recuperacion-30']];
-    }
-    let best = null, bestScore = Infinity;
-    cand.forEach((w) => {
-      const score = Math.abs(w.durationS - desDur) / Math.max(desDur, 1800)
-        + Math.abs(w.tss - desTss) / Math.max(desTss, 20)
-        + (avoid.prev.has(w.id) ? 0.3 : 0) + (avoid.cur.has(w.id) ? 1 : 0);
-      if (score < bestScore) { best = w; bestScore = score; }
-    });
-    return best;
+  const SOFT_CATS = ['recuperacion', 'resistencia', 'tempo', 'sweetspot'];
+
+  // Variedad: penaliza workouts usados recientemente (history: id -> índice de la última semana en que se usó)
+  function varietyPenalty(id, weekIdx, history) {
+    const last = history[id];
+    if (last == null) return 0;
+    const dist = weekIdx - last;
+    return dist <= 1 ? 0.4 : dist <= 4 ? 0.25 : dist <= 8 ? 0.1 : 0;
   }
 
   function buildWeek(o) {
@@ -345,65 +338,102 @@
     const assigned = {};
     const capS = o.hours * 3600 * 1.1;
     let used = 0, rampTss = 0;
-    const cur = new Set();
     let slots = train.slice();
+    const fixed = [];
     if (o.ramp) {
       const rd = o.ramp === 'first' ? train[0] : train[train.length - 1];
       const ramp = byId['ramp-test'];
       assigned[rd] = ramp.id;
       used += ramp.durationS;
       rampTss = ramp.tss;
-      cur.add(ramp.id);
+      fixed.push(ramp.id);
       slots = train.filter((d) => d !== rd);
     }
     const scale = o.phase === 'descarga' || o.phase === 'taper' ? UNLOAD : 1;
-    const hDes = Math.max(0, o.hours * 3600 * scale - used);
-    const tDes = Math.max(0, o.targetTss - rampTss);
+    const hDes = Math.max(1, o.hours * 3600 * scale - used);
+    const tDes = Math.max(1, o.targetTss - rampTss);
     const roles = rolesFor(o.goal, o.phase);
     const ordered = slots.map((d) => ({ date: d, pos: PREF_DAYS.indexOf(weekday(d)) })).sort((a, b) => a.pos - b.pos);
-    const wSum = ordered.reduce((s, x) => s + SLOT_W[x.pos], 0);
-    ordered.forEach((slot, idx) => {
+    const wSum = ordered.reduce((sum, x) => sum + SLOT_W[x.pos], 0);
+
+    // candidatos por slot: los del rol (sin penalización) + alternativas suaves (penalizadas)
+    const pools = ordered.map((slot) => {
       const cats = roles[slot.pos];
-      const remainMin = (ordered.length - idx - 1) * MIN_SESSION_S;
-      const share = SLOT_W[slot.pos] / wSum;
-      const w = pickWorkout(cats, capS - used - remainMin, hDes * share, tDes * share, { prev: o.prevIds, cur: cur });
-      assigned[slot.date] = w.id;
-      used += w.durationS;
-      cur.add(w.id);
+      const inRole = poolFor(cats).map((w) => ({ w: w, pen: 0 }));
+      const soft = poolFor(SOFT_CATS).filter((w) => cats.indexOf(w.category) < 0).map((w) => ({ w: w, pen: 0.35 }));
+      return inRole.concat(soft);
     });
+    const cost = (pick) => {
+      let dur = used, tss = rampTss, pen = 0;
+      pick.forEach((c, i) => {
+        dur += c.w.durationS;
+        tss += c.w.tss;
+        pen += c.pen + varietyPenalty(c.w.id, o.weekIdx, o.history) + (fixed.indexOf(c.w.id) >= 0 ? 1 : 0);
+      });
+      pick.forEach((c, i) => { if (pick.findIndex((d) => d.w.id === c.w.id) !== i) pen += 1; });
+      const over = Math.max(0, dur - capS) / capS;
+      return 6 * Math.abs(tss - o.targetTss) / o.targetTss + Math.abs(dur - hDes - used) / (hDes + used) + 1000 * over + pen;
+    };
+    // inicio voraz: duración más cercana a la parte que le corresponde
+    let pick = ordered.map((slot, i) => {
+      const des = hDes * (SLOT_W[slot.pos] / wSum);
+      return pools[i].slice().sort((a, b) => (Math.abs(a.w.durationS - des) + a.pen * 1e4) - (Math.abs(b.w.durationS - des) + b.pen * 1e4))[0];
+    });
+    let best = cost(pick);
+    for (let pass = 0; pass < 12; pass++) {
+      let improved = false;
+      for (let i = 0; i < pick.length; i++) {
+        for (const c of pools[i]) {
+          if (c === pick[i]) continue;
+          const trial = pick.slice();
+          trial[i] = c;
+          const v = cost(trial);
+          if (v < best - 1e-9) { pick = trial; best = v; improved = true; }
+        }
+      }
+      if (!improved) break;
+    }
+    ordered.forEach((slot, i) => { assigned[slot.date] = pick[i].w.id; });
     return dates.map((d) => ({ date: d, workoutId: assigned[d] || null, status: 'pendiente' }));
   }
 
   function buildPlan(opts) {
-    const profile = opts.profile || {};
-    const startDate = opts.startDate;
+    const profile = (opts && opts.profile) || {};
+    const startDate = opts && opts.startDate;
+    if (typeof startDate !== 'string' || !DATE_RE.test(startDate)) {
+      throw new Error('startDate es obligatoria y debe tener formato AAAA-MM-DD.');
+    }
     const goal = GOAL_K[profile.goal] != null ? profile.goal : 'forma';
     const hours = Math.max(1, Number(profile.hoursPerWeek) || 5);
     const days = clamp(Math.round(Number(profile.daysPerWeek) || 4), 2, 7);
     let n = clamp(Math.round(profile.weeks != null ? Number(profile.weeks) : 8) || 8, 4, 24);
-    const taper = goal === 'evento' && !!profile.eventDate;
-    if (taper) n = clamp(Math.ceil((dayNum(profile.eventDate) - dayNum(startDate)) / 7), 4, 24);
-    let load = hours * GOAL_K[goal] * (profile.level === 'principiante' ? 0.85 : 1);
-    let lastLoad = load;
-    let prevIds = new Set();
+    const event = (goal === 'evento' || goal === 'gran-fondo') && !!profile.eventDate;
+    const taper = event;
+    if (event) n = clamp(Math.ceil((dayNum(profile.eventDate) - dayNum(startDate)) / 7), 4, 24);
+    const t0 = hours * GOAL_K[goal] * (profile.level === 'principiante' ? 0.85 : 1);
+    // tope de realizabilidad: por horas y por días (sesiones de <=120 min rinden ~85 TSS como máximo en la práctica)
+    const maxTss = Math.min(t0 * 1.6, hours * 1.1 * 72, days * 85);
+    let lastLoad = Math.min(t0, maxTss);
+    const history = {};
     const weeks = [];
     for (let i = 1; i <= n; i++) {
-      const phase = phaseFor(i, n, taper, goal);
+      const phase = phaseFor(i, n, taper, event);
       let target;
       if (phase === 'descarga' || phase === 'taper') target = lastLoad * UNLOAD;
       else {
-        if (i > 1) load *= 1.08;
-        target = load;
-        lastLoad = load;
+        // la progresión se reinicia por bloque de 4 semanas: inicio x (1 + 0.05 k) x 1.08^j
+        const k = Math.floor((i - 1) / 4), j = (i - 1) % 4;
+        target = Math.min(t0 * (1 + 0.05 * k) * Math.pow(1.08, j), maxTss);
+        lastLoad = target;
       }
       let ramp = null;
       if (phase === 'descarga') ramp = 'last';
       else if (i === 1 && profile.ftpEstimated) ramp = 'first';
       const wdays = buildWeek({
-        weekStart: addDays(startDate, 7 * (i - 1)), phase: phase, goal: goal, hours: hours, days: days,
-        targetTss: target, ramp: ramp, prevIds: prevIds,
+        weekStart: addDays(startDate, 7 * (i - 1)), weekIdx: i, phase: phase, goal: goal, hours: hours, days: days,
+        targetTss: target, ramp: ramp, history: history,
       });
-      prevIds = new Set(wdays.filter((d) => d.workoutId).map((d) => d.workoutId));
+      wdays.forEach((d) => { if (d.workoutId) history[d.workoutId] = i; });
       weeks.push({ index: i, phase: phase, targetTss: r1(target), days: wdays });
     }
     const now = opts.now ? new Date(opts.now) : new Date();
@@ -508,27 +538,34 @@
   function suggestFtpUpdate(activities, profile, o) {
     const today = todayStr(o && o.today);
     const from = addDays(today, -42);
-    const cands = [];
-    let b20 = null, bRamp = null;
+    const cur = profile && profile.ftp;
+    let best = null;
+    const consider = (ftp, d, reason, isTest) => {
+      // solo un test puede bajar el FTP; un rodaje cualquiera solo puede subirlo
+      if (!isTest && !(cur > 0 ? ftp > cur : true)) return;
+      if (!best || ftp > best.ftp) best = { ftp: ftp, d: d, reason: reason };
+    };
     (activities || []).forEach((a) => {
       const d = localDate(a.date);
       if (d < from || d > today) return;
       const powers = actPowers(a);
-      const w20 = effort(a, powers, 1200);
-      if (w20 != null && (!b20 || w20 > b20.w)) b20 = { w: w20, d: d };
       if (a.workoutId === 'ramp-test') {
         const w1 = effort(a, powers, 60);
-        if (w1 != null && (!bRamp || w1 > bRamp.w)) bRamp = { w: w1, d: d };
+        if (w1 != null) {
+          const f = Math.round(0.75 * w1);
+          consider(f, d, 'Tu mejor minuto en el test de rampa (' + Math.round(w1) + ' W, ' + d + ') equivale a un FTP de ' + f + ' W (75 %).', true);
+        }
+        return;
+      }
+      const w20 = effort(a, powers, 1200);
+      if (w20 != null) {
+        const f = Math.round(0.95 * w20);
+        consider(f, d, 'Tu mejor esfuerzo de 20 minutos (' + Math.round(w20) + ' W, ' + d + ') equivale a un FTP de ' + f + ' W (95 %).', a.workoutId === 'ftp-20');
       }
     });
-    if (b20) cands.push({ ftp: Math.round(0.95 * b20.w), d: b20.d, reason: 'Tu mejor esfuerzo de 20 minutos (' + Math.round(b20.w) + ' W, ' + b20.d + ') equivale a un FTP de ' + Math.round(0.95 * b20.w) + ' W (95 %).' });
-    if (bRamp) cands.push({ ftp: Math.round(0.75 * bRamp.w), d: bRamp.d, reason: 'Tu mejor minuto en el test de rampa (' + Math.round(bRamp.w) + ' W, ' + bRamp.d + ') equivale a un FTP de ' + Math.round(0.75 * bRamp.w) + ' W (75 %).' });
-    if (!cands.length) return null;
-    cands.sort((a, b) => (a.d < b.d ? 1 : a.d > b.d ? -1 : 0));
-    const c = cands[0];
-    const cur = profile && profile.ftp;
-    if (cur > 0 && Math.abs(c.ftp - cur) / cur <= 0.02) return null;
-    return { suggestedFtp: c.ftp, reason: c.reason + (cur > 0 ? ' Tu FTP actual es ' + cur + ' W.' : '') };
+    if (!best) return null;
+    if (cur > 0 && Math.abs(best.ftp - cur) / cur <= 0.02) return null;
+    return { suggestedFtp: best.ftp, reason: best.reason + (cur > 0 ? ' Tu FTP actual es ' + cur + ' W.' : '') };
   }
 
   // ======================================================================
@@ -582,7 +619,7 @@
         const target = upcoming.find((d) => getWorkout(d.workoutId).category !== 'test');
         if (target) {
           const orig = getWorkout(target.workoutId);
-          const rep = library.filter((w) => w.category === orig.category && w.tss > orig.tss).sort((a, b) => a.tss - b.tss)[0];
+          const rep = library.filter((w) => w.category === orig.category && w.tss > orig.tss && w.durationS <= orig.durationS * 1.1).sort((a, b) => a.tss - b.tss)[0];
           if (rep) {
             target.workoutId = rep.id;
             reason = 'Tus dos últimas sesiones intensas se sintieron fáciles (RPE 4 o menos) y llegas fresco (TSB ' + Math.round(tsb) + '). Subimos tu próxima sesión de "' + orig.name + '" a "' + rep.name + '".';
@@ -590,7 +627,7 @@
         }
       }
     }
-    next.lastAdaptation = reason ? { date: today, reason: reason } : (plan.lastAdaptation || null);
+    next.lastAdaptation = reason ? { date: today, reason: reason } : null;
     return next;
   }
 
@@ -657,8 +694,9 @@
     const today = todayStr(opt.today);
     const seed = dayNum(today);
     const name = profile.name ? String(profile.name) : '';
-    const lead = name ? name + ', ' : '';
-    const cap = (s) => (lead ? s : s.charAt(0).toUpperCase() + s.slice(1));
+    const capFirst = (t) => t.replace(/\p{L}/u, (c) => c.toUpperCase());
+    const nameCap = capFirst(name);
+    const cap = (t) => (nameCap ? nameCap + ', ' + t : capFirst(t));
     const parts = [];
 
     // racha
@@ -699,12 +737,12 @@
       const pcBy = {};
       pc.forEach((x) => { pcBy[x.durationS] = x.watts; });
       const pb = rc.filter((x) => pcBy[x.durationS] != null && x.watts > pcBy[x.durationS]).sort((a, b) => b.durationS - a.durationS)[0];
-      if (pb) parts.push(cap('¡nuevo récord personal esta semana! ' + pb.watts + ' W durante ' + DURATION_LABEL[pb.durationS] + '.'));
+      if (pb) parts.push(cap('nuevo récord personal esta semana: ' + pb.watts + ' W durante ' + DURATION_LABEL[pb.durationS] + '.'));
     }
 
     const base = motivationPhrases[seed % motivationPhrases.length];
     if (parts.length) return parts[seed % parts.length] + ' ' + base;
-    return name ? '¡' + name + '! ' + base : base;
+    return nameCap ? nameCap + ': ' + base : base;
   }
 
   R.training = {
