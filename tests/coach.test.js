@@ -264,10 +264,11 @@ test('voz: preferencia es-CL > es-419/US/MX > es-ES > es-*', () => {
 
 function fakeEnv() {
   const spoken = [], osc = [], order = [];
-  let cancelled = 0, speaking = false, t = 0, intervalFn = null;
+  let cancelled = 0, speaking = false, pending = false, t = 0, intervalFn = null; const timers = [];
   class Utter { constructor(text) { this.text = text; } }
+  const ctxHolder = [];
   class Ctx {
-    constructor() { order.push('ctx'); this.state = 'suspended'; this.currentTime = 0; this.destination = {}; }
+    constructor() { ctxHolder.push(this); order.push('ctx'); this.state = 'suspended'; this.currentTime = 0; this.destination = {}; }
     resume() { this.state = 'running'; return Promise.resolve(); }
     close() {}
     createGain() { return { gain: { setValueAtTime() {}, linearRampToValueAtTime() {}, exponentialRampToValueAtTime() {} }, connect() {} }; }
@@ -277,10 +278,11 @@ function fakeEnv() {
   Object.defineProperty(navigator, 'audioSession', { value: { set type(v) { order.push('session:' + v); } }, enumerable: true });
   const env = {
     navigator, AudioContext: Ctx, SpeechSynthesisUtterance: Utter,
-    speechSynthesis: { getVoices: () => [{ lang: 'es-CL', name: 'Chile' }], speak: (u) => { spoken.push(u); speaking = true; }, cancel: () => { cancelled++; speaking = false; }, get speaking() { return speaking; } },
+    speechSynthesis: { getVoices: () => [{ lang: 'es-CL', name: 'Chile' }], speak: (u) => { spoken.push(u); speaking = true; }, cancel: () => { cancelled++; speaking = false; }, get speaking() { return speaking; }, get pending() { return pending; }, _set(v) { speaking = v; } },
+    setTimeout: (fn) => { timers.push(fn); return timers.length; }, clearTimeout() {},
     setInterval: (fn) => { intervalFn = fn; return 1; }, clearInterval() {},
   };
-  return { env, spoken, osc, order, now: () => t, advance: (ms) => { t += ms; }, cancelled: () => cancelled, tick: () => intervalFn && intervalFn() };
+  return { env, spoken, osc, order, timers, ctxs: () => ctxHolder, now: () => t, advance: (ms) => { t += ms; }, cancelled: () => cancelled, tick: () => intervalFn && intervalFn() };
 }
 
 test('audio: audioSession ambient antes de crear el AudioContext; un solo contexto', () => {
@@ -335,4 +337,102 @@ test('audio: watchdog cancela speechSynthesis pegado > 8 s', () => {
 test('audio: sin speechSynthesis ni AudioContext no lanza (Node)', () => {
   const a = C.createAudio();
   assert.doesNotThrow(() => { a.unlock(); a.say('x'); a.beep('tick'); a.setVolume(0.3); a.setEnabled({ voice: true, beeps: true }); a.test(); a.dispose(); });
+});
+
+test('intensidad: los vatios hablados aplican ride.intensity (anuncio y escalón)', () => {
+  const r = rig();
+  const workout = { steps: [st(60, 50), st(240, 100)] };
+  r.clock.t = 1000;
+  r.coach.update({ mode: 'workout', tS: 52, paused: false, workout, ftp: FTP, intensity: 1.1, stepIndex: 0, stepElapsedS: 52, stepRemainingS: 8 });
+  assert.ok(r.texts().includes('Prepárate: 4 minutos a 275 vatios'));
+  const q = rig();
+  const ramp = { id: 'ramp-test', steps: [st(60, 45), st(60, 51)] };
+  q.coach.update({ mode: 'workout', tS: 10, paused: false, workout: ramp, ftp: FTP, intensity: 0.9, stepIndex: 0, stepElapsedS: 10, stepRemainingS: 50 });
+  q.clock.t = 100;
+  q.coach.update({ mode: 'workout', tS: 61, paused: false, workout: ramp, ftp: FTP, intensity: 0.9, stepIndex: 1, stepElapsedS: 1, stepRemainingS: 59 });
+  assert.ok(q.texts().includes('Siguiente escalón: 115 vatios'));
+});
+
+test('test de rampa: sin "Prepárate", solo "Siguiente escalón"', () => {
+  const r = rig();
+  playWorkout(r, [st(60, 45), st(60, 51), st(60, 57)], { id: 'ramp-test', to: 125 });
+  assert.ok(!r.texts().some((x) => x.indexOf('Prepárate') === 0));
+  assert.ok(r.texts().some((x) => x.indexOf('Siguiente escalón') === 0));
+});
+
+test('resistencia larga: "Nos sentamos" sale aunque el "¡Arriba!" fuese tarde en el paso', () => {
+  const r = rig();
+  // el paso dura 1230 s: a los 600 s quedan 630 s (hay ¡Arriba!); a los 1200 s quedan 30 s (< 40): sin ¡Arriba! ni Nos sentamos
+  playWorkout(r, [st(1230, 60)], { to: 1225 });
+  const t = r.texts();
+  assert.strictEqual(t.filter((x) => x.indexOf('¡Arriba!') === 0).length, 1);
+  assert.strictEqual(t.filter((x) => x === 'Nos sentamos').length, 1);
+  // ¡Arriba! emitido justo antes del umbral: el "Nos sentamos" debe salir aunque rem ya sea < 40
+  const q = rig();
+  const w = { steps: [st(1000, 60)] };
+  const base = { mode: 'workout', paused: false, workout: w, ftp: FTP, stepIndex: 0 };
+  q.clock.t = 0; q.coach.update(Object.assign({ tS: 600, stepElapsedS: 600, stepRemainingS: 400 }, base));
+  q.clock.t = 10000; q.coach.update(Object.assign({ tS: 970, stepElapsedS: 970, stepRemainingS: 30 }, base));
+  assert.ok(q.texts().includes('Nos sentamos'));
+});
+
+test('varias frases de cuenta en un mismo flush: solo la más reciente', () => {
+  const w2 = { steps: [st(30, 50), st(30, 100), st(30, 50)] };
+  const z = rig();
+  z.coach.update({ mode: 'workout', tS: 0, paused: false, workout: w2, ftp: FTP, stepIndex: 0, stepElapsedS: 0, stepRemainingS: 30 });
+  z.coach.update({ mode: 'workout', tS: 30.2, paused: false, workout: w2, ftp: FTP, stepIndex: 1, stepElapsedS: 27.1, stepRemainingS: 2.9 });
+  // ¡Vamos! (cambio de paso) y Tres (cuenta del paso nuevo) coinciden: solo suena la más reciente
+  assert.deepStrictEqual(z.texts().filter((x) => ['Tres', 'Dos', 'Uno', '¡Vamos!'].includes(x)), ['Tres']);
+});
+
+test('audio: no cancela si no hay nada sonando; si cancela, difiere el speak ~40 ms', () => {
+  const f = fakeEnv();
+  const a = C.createAudio({ env: f.env, now: f.now });
+  a.unlock();
+  f.env.speechSynthesis._set(false);
+  const n0 = f.spoken.length;
+  a.say('Tres', { priority: C.PRIORITY.COUNT });
+  assert.strictEqual(f.cancelled(), 0);
+  assert.strictEqual(f.spoken.length, n0 + 1);
+  f.env.speechSynthesis._set(true);
+  a.say('Dos', { priority: C.PRIORITY.COUNT });
+  assert.strictEqual(f.cancelled(), 1);
+  assert.strictEqual(f.spoken.length, n0 + 1); // aún no
+  f.timers.forEach((fn) => fn());
+  assert.strictEqual(f.spoken.length, n0 + 2);
+  assert.strictEqual(f.spoken[f.spoken.length - 1].text, 'Dos');
+});
+
+test('audio: el watchdog mide cada frase, no el tiempo seguido hablando', () => {
+  const f = fakeEnv();
+  const a = C.createAudio({ env: f.env, now: f.now });
+  a.unlock();
+  f.env.speechSynthesis._set(false);
+  a.say('A', { priority: 1 });
+  const uA = f.spoken[f.spoken.length - 1];
+  f.advance(7000); f.tick();
+  uA.onend(); // A termina a los 7 s y empieza B enseguida
+  a.say('B', { priority: 1 });
+  const c0 = f.cancelled();
+  f.advance(2000); f.tick(); // 9 s desde A, 2 s desde B
+  assert.strictEqual(f.cancelled(), c0);
+  f.advance(7000); f.tick(); // B lleva 9 s
+  assert.strictEqual(f.cancelled(), c0 + 1);
+});
+
+test('audio: reanuda el contexto si no está running (iOS interrupted) y atrapa rechazos', () => {
+  const f = fakeEnv();
+  const a = C.createAudio({ env: f.env });
+  a.unlock();
+  const ctx = f.ctxs()[0];
+  let resumes = 0;
+  ctx.resume = () => { resumes++; return Promise.reject(new Error('x')); };
+  ctx.close = () => Promise.reject(new Error('x'));
+  ctx.state = 'interrupted';
+  a.beep('tick');
+  assert.strictEqual(resumes, 1);
+  ctx.state = 'running';
+  a.beep('tick');
+  assert.strictEqual(resumes, 1);
+  assert.doesNotThrow(() => a.dispose());
 });

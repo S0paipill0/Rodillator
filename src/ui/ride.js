@@ -827,7 +827,7 @@
         coach.update({
           mode: r.mode, tS: r.tS, paused: false, workout: r.workout, ftp, stepIndex: tp ? tp.stepIndex : null,
           stepElapsedS: tp ? tp.stepElapsedS : 0, stepRemainingS: tp ? tp.stepRemainingS : 0, targetW: tp ? tp.watts : 0,
-          powerW: r.power, gradePct: r.grade, distM: r.distM, routeLenM: len, speedMps: r.v,
+          powerW: r.power, gradePct: r.grade, distM: r.distM, routeLenM: len, speedMps: r.v, intensity: r.intensity,
           workoutRemainingS: r.workout ? r.workout.durationS - r.tS : 0,
         });
       }

@@ -50,8 +50,10 @@
   }
   function isLongEndurance(step) { return !!step && step.durationS >= 900 && step.powerPct < 80; }
 
-  function nextAnnouncement(next, ftp) {
-    var what = next.powerPct < 60 ? 'a ritmo suave' : 'a ' + round5(next.powerPct * ftp / 100) + ' vatios';
+  // vatios hablados: los que de verdad se piden (aplica el ajuste de intensidad de la rodada)
+  function spokenWatts(pct, s) { return round5(pct * s.ftp * (s.intensity > 0 ? s.intensity : 1) / 100); }
+  function nextAnnouncement(next, s) {
+    var what = next.powerPct < 60 ? 'a ritmo suave' : 'a ' + spokenWatts(next.powerPct, s) + ' vatios';
     return 'Prepárate: ' + spokenDuration(next.durationS) + ' ' + what;
   }
 
@@ -87,11 +89,13 @@
       var t = nowFn();
       queue = queue.filter(function (q) { return q.pri > PRI.NEXT || t - q.t <= 3000; });
       // la cuenta regresiva no espera: corta lo que esté sonando
-      var rest = [];
-      queue.forEach(function (q) {
-        if (q.pri === PRI.COUNT) { sayFn(q.text, { priority: q.pri }); busyUntil = t + estimateMs(q.text); } else rest.push(q);
-      });
+      var rest = [], counts = [];
+      queue.forEach(function (q) { if (q.pri === PRI.COUNT) counts.push(q); else rest.push(q); });
       queue = rest;
+      if (counts.length) { // varias a la vez: solo la más reciente
+        var c = counts[counts.length - 1];
+        sayFn(c.text, { priority: c.pri }); busyUntil = t + estimateMs(c.text);
+      }
       if (!queue.length || t < busyUntil) return;
       var best = 0;
       for (var i = 1; i < queue.length; i++) if (queue[i].pri > queue[best].pri) best = i;
@@ -114,7 +118,7 @@
           beep('go');
           if (Math.abs(up) < 10) {
             // cambio pequeño (p. ej. escalones del test de rampa): solo pitido y, en la rampa, el vatiaje
-            if (s.workout.id === 'ramp-test') speak('Siguiente escalón: ' + round5(step.powerPct * s.ftp / 100) + ' vatios', PRI.REST);
+            if (s.workout.id === 'ramp-test') speak('Siguiente escalón: ' + spokenWatts(step.powerPct, s) + ' vatios', PRI.REST);
           } else if (up > 0) speak('¡Vamos!', PRI.COUNT); else speak('¡Recupera!', PRI.COUNT);
         }
         var stand = isStanding(step), wasStand = isStanding(before);
@@ -135,7 +139,7 @@
         }
       }
       // anuncio del siguiente intervalo (~10 s antes)
-      if (next && dur >= 30 && rem > 3.5 && rem <= 10 && once('next:' + i)) speak(nextAnnouncement(next, s.ftp), PRI.NEXT);
+      if (next && dur >= 30 && rem > 3.5 && rem <= 10 && s.workout.id !== 'ramp-test' && once('next:' + i)) speak(nextAnnouncement(next, s), PRI.NEXT);
       // mitad / último minuto
       if (dur >= 180) {
         if (el >= dur / 2 && el < dur - 60 && once('half:' + i)) speak('Mitad del intervalo', PRI.REST);
@@ -144,9 +148,10 @@
       // resistencia larga: soltar piernas cada 10 min
       if (isLongEndurance(step)) {
         var k = Math.floor(el / 600);
-        if (k >= 1 && rem > 40) {
-          if (once('leg:' + i + ':' + k)) speak('¡Arriba! 20 segundos de pie para soltar las piernas', PRI.POSTURE);
-          if (el >= k * 600 + 20 && once('legs:' + i + ':' + k)) speak('Nos sentamos', PRI.POSTURE);
+        if (k >= 1) {
+          if (rem > 40 && once('leg:' + i + ':' + k)) speak('¡Arriba! 20 segundos de pie para soltar las piernas', PRI.POSTURE);
+          // "Nos sentamos" sale siempre que el "¡Arriba!" correspondiente ya se dijo
+          if (fired['leg:' + i + ':' + k] && el >= k * 600 + 20 && once('legs:' + i + ':' + k)) speak('Nos sentamos', PRI.POSTURE);
         }
       }
     }
@@ -260,7 +265,7 @@
     var Ctx = env.AudioContext || env.webkitAudioContext || null;
     var nowFn = o.now || function () { return Date.now(); };
     var st = { volume: o.volume == null ? DEFAULTS.volume : Math.min(1, Math.max(0, Number(o.volume) || 0)), voice: o.voice !== false, beeps: o.beeps !== false };
-    var ctx = null, voice = null, dog = null, speakingSince = null, disposed = false;
+    var ctx = null, voice = null, dog = null, speakingSince = null, disposed = false, deferred = [], deferTimer = null;
 
     function loadVoices() {
       if (!synth) return;
@@ -278,11 +283,18 @@
       try { talking = !!synth.speaking; } catch (e) { /* nada */ }
       if (!talking) { speakingSince = null; return; }
       if (speakingSince == null) speakingSince = t;
+      // se mide la frase actual (marca en speak/onstart, se borra en onend), no el tiempo seguido hablando
       else if (t - speakingSince > 8000) { try { synth.cancel(); } catch (e) { /* nada */ } speakingSince = null; }
     }
     function startWatchdog() {
       if (dog || !synth || !env.setInterval) return;
       dog = env.setInterval(watchdog, 2000);
+    }
+
+    // 'suspended' (autoplay) e 'interrupted' (iOS) también se reanudan
+    function resumeCtx() {
+      if (!ctx || ctx.state === 'running' || !ctx.resume) return;
+      try { var p = ctx.resume(); if (p && p.catch) p.catch(function () {}); } catch (e) { /* nada */ }
     }
 
     function unlock() {
@@ -293,7 +305,7 @@
       } catch (e) { /* nada */ }
       try {
         if (!ctx && Ctx) ctx = new Ctx();
-        if (ctx && ctx.state === 'suspended' && ctx.resume) { var p = ctx.resume(); if (p && p.catch) p.catch(function () {}); }
+        resumeCtx();
       } catch (e) { ctx = null; }
       if (synth && Utter) {
         try { var u = new Utter(' '); u.volume = 0; synth.speak(u); } catch (e) { /* nada */ }
@@ -301,17 +313,36 @@
       startWatchdog();
     }
 
+    function flushDeferred() {
+      deferTimer = null;
+      var list = deferred.splice(0);
+      if (disposed || !synth) return;
+      list.forEach(function (u) { try { speakingSince = nowFn(); synth.speak(u); } catch (e) { /* nada */ } });
+    }
+
     function say(text, sayOpts) {
       if (disposed || !st.voice || !synth || !Utter || !text) return false;
       try {
         if (!voice) loadVoices();
-        if (sayOpts && sayOpts.priority >= PRI.COUNT) synth.cancel();
+        var busy = !!(synth.speaking || synth.pending);
+        var cancel = !!(sayOpts && sayOpts.priority >= PRI.COUNT) && busy;
         var u = new Utter(text);
         u.lang = voice ? voice.lang : 'es-CL';
         if (voice) u.voice = voice;
         u.rate = 1.08;
         u.volume = st.volume;
-        synth.speak(u);
+        u.onstart = function () { speakingSince = nowFn(); };
+        u.onend = u.onerror = function () { speakingSince = null; };
+        if (cancel) {
+          synth.cancel();
+          deferred.length = 0;
+        }
+        if ((cancel || deferred.length) && env.setTimeout) {
+          // Chrome/Safari pierden el speak() que sigue de inmediato a cancel()
+          deferred.push(u);
+          if (deferTimer) env.clearTimeout(deferTimer);
+          deferTimer = env.setTimeout(flushDeferred, 40);
+        } else { speakingSince = nowFn(); synth.speak(u); }
         startWatchdog();
         return true;
       } catch (e) { return false; }
@@ -330,7 +361,7 @@
     function beep(kind) {
       if (disposed || !st.beeps || !ctx) return false;
       try {
-        if (ctx.state === 'suspended' && ctx.resume) ctx.resume();
+        resumeCtx();
         var t = ctx.currentTime, peak = 0.4 * st.volume;
         if (kind === 'tick') tone(880, t, 0.12, peak);
         else if (kind === 'go') tone(1320, t, 0.25, peak);
@@ -353,7 +384,9 @@
         if (dog && env.clearInterval) env.clearInterval(dog);
         dog = null;
         if (synth) { try { synth.cancel(); synth.onvoiceschanged = null; } catch (e) { /* nada */ } }
-        if (ctx && ctx.close) { try { ctx.close(); } catch (e) { /* nada */ } }
+        if (deferTimer && env.clearTimeout) env.clearTimeout(deferTimer);
+        deferred.length = 0;
+        if (ctx && ctx.close) { try { var cp = ctx.close(); if (cp && cp.catch) cp.catch(function () {}); } catch (e) { /* nada */ } }
         ctx = null;
       },
       _watchdog: watchdog
