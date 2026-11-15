@@ -9,9 +9,9 @@
   const MINUS = '−';
   const ACCENT = '#FF5A1F', GHOST = '#FFD23F', BOT = '#7FA7C9';
   const CAMERAS = [
-    { id: 'persecucion', label: 'Persecución' },
-    { id: 'aerea', label: 'Aérea' },
-    { id: 'lateral', label: 'Lateral' },
+    { id: 'persecucion', label: 'Persecución', short: 'Persec.' },
+    { id: 'aerea', label: 'Aérea', short: 'Aérea' },
+    { id: 'lateral', label: 'Lateral', short: 'Lateral' },
   ];
   const RPE_SCALE = [
     { n: 1, label: 'Muy fácil', desc: 'Podrías conversar sin problema durante horas.' },
@@ -231,7 +231,45 @@
     return null;
   }
 
+  // Texto de la píldora de posiciones: "7.º · Fantasma +12 s" (con fantasma) o "3.º de 7".
+  function positionPill(ranked, userId, ghostGapS) {
+    const list = ranked || [];
+    const iu = list.findIndex((r) => r.id === userId);
+    if (iu < 0) return '';
+    const pos = (iu + 1) + '.º';
+    if (ghostGapS != null) return pos + ' · Fantasma ' + fmtGap(ghostGapS);
+    return list.length > 1 ? pos + ' de ' + list.length : pos;
+  }
+
+  // Márgenes del HUD sobre la escena (px CSS, relativos a la escena) a partir de rectángulos medidos.
+  // rects: { scene:{top,bottom,left,right}, top:{bottom}|null, strip:{top}|null, controls:{left}|null }
+  function computeViewInsets(rects) {
+    const sc = rects && rects.scene;
+    if (!sc) return { top: 0, bottom: 0, left: 0, right: 0 };
+    const pos = (v) => Math.max(0, Math.round(v));
+    return {
+      top: rects.top ? pos(rects.top.bottom - sc.top) : 0,
+      bottom: rects.strip ? pos(sc.bottom - rects.strip.top) : 0,
+      left: 0,
+      right: rects.controls ? pos(sc.right - rects.controls.left) : 0,
+    };
+  }
+
+  // Doble toque: dos toques a menos de maxMs y maxDist px. tap(t, x, y) devuelve true en el segundo.
+  function createDoubleTap(maxMs, maxDist) {
+    const ms = maxMs || 320, dist = maxDist || 36;
+    let last = null;
+    return {
+      tap(t, x, y) {
+        if (last && t - last.t <= ms && Math.hypot(x - last.x, y - last.y) <= dist) { last = null; return true; }
+        last = { t, x, y };
+        return false;
+      },
+    };
+  }
+
   R.rideLogic = {
+    positionPill, computeViewInsets, createDoubleTap,
     fmtTime, fmtGap, fmtKm, ymd, ghostTimeAt, ghostGapS, ghostSpeed, createSampler, createEventDetector,
     windowAround, zoneSeconds, buildActivity, gradeArrow, pickTodayWorkout,
     RPE_SCALE, CAMERAS, durText, clamp,
@@ -244,6 +282,7 @@
   // ======================================================================
   const L = R.rideLogic;
   const BIKE_KG = 8;
+  const MOBILE_MQ = '(max-width: 700px), (max-height: 500px)';
   const LOOP_MSG = 'La ruta se repite si pasas la meta.';
   let inst = null;
 
@@ -548,6 +587,61 @@
     let stage = null;       // referencias DOM del HUD
     let rafId = 0, hiddenIv = 0;
     let wakeLock = null;
+    let moreOpen = readMore();   // "Más datos": se recuerda durante la sesión
+    let layoutKey = '';
+    let boardTimer = 0;
+
+    function readMore() { try { return window.sessionStorage.getItem('rodillator.hud.more') === '1'; } catch (e) { return false; } }
+    function isMobile() { try { return !!(window.matchMedia && window.matchMedia(MOBILE_MQ).matches); } catch (e) { return false; } }
+    function setMoreLabel() {
+      if (!stage || !stage.moreBtn) return;
+      stage.moreBtn.textContent = moreOpen ? 'Menos datos ▴' : 'Más datos ▾';
+      stage.moreBtn.setAttribute('aria-expanded', moreOpen ? 'true' : 'false');
+      stage.moreBtn.setAttribute('aria-label', moreOpen ? 'Ocultar cadencia, frecuencia cardíaca y trabajo' : 'Mostrar cadencia, frecuencia cardíaca y trabajo');
+    }
+    function toggleMore() {
+      moreOpen = !moreOpen;
+      try { window.sessionStorage.setItem('rodillator.hud.more', moreOpen ? '1' : '0'); } catch (e) { /* sin sessionStorage */ }
+      root.classList.toggle('is-more', moreOpen);
+      setMoreLabel();
+      syncLayout(true);
+    }
+    function closeBoard() {
+      if (boardTimer) { clearTimeout(boardTimer); timers.delete(boardTimer); boardTimer = 0; }
+      if (!stage) return;
+      stage.board.classList.remove('is-open');
+      stage.pill.setAttribute('aria-expanded', 'false');
+    }
+    function toggleBoard() {
+      if (!stage) return;
+      if (stage.board.classList.contains('is-open')) { closeBoard(); return; }
+      stage.board.classList.add('is-open');
+      stage.pill.setAttribute('aria-expanded', 'true');
+      boardTimer = later(closeBoard, 5000); // se cierra sola a los 5 s
+    }
+    // Mide el HUD real: fija variables CSS de la zona libre y avisa a la escena 3D.
+    function syncLayout(force) {
+      if (!stage || !scene) return;
+      const mobile = isMobile();
+      const sc = stage.sceneEl.getBoundingClientRect();
+      let ins = { top: 0, bottom: 0, left: 0, right: 0 };
+      if (mobile) {
+        const tr = stage.top.getBoundingClientRect();
+        const br = stage.charts.parentNode.getBoundingClientRect();
+        const cr = stage.controls.getBoundingClientRect();
+        // la columna de controles va a la derecha: solo cuenta como margen derecho si es una columna estrecha
+        ins = L.computeViewInsets({ scene: sc, top: { bottom: tr.bottom }, strip: { top: br.top }, controls: cr.width ? { left: cr.left } : null });
+        root.style.setProperty('--rd-top-h', Math.round(tr.bottom - sc.top) + 'px');
+        root.style.setProperty('--rd-bot-h', Math.round(sc.bottom - br.top) + 'px');
+      } else {
+        root.style.removeProperty('--rd-top-h'); root.style.removeProperty('--rd-bot-h');
+        closeBoard();
+      }
+      const key = [mobile ? 1 : 0, ins.top, ins.bottom, ins.left, ins.right, Math.round(sc.width), Math.round(sc.height)].join(',');
+      if (!force && key === layoutKey) return;
+      layoutKey = key;
+      if (scene.setViewInsets) scene.setViewInsets(ins);
+    }
 
     function currentMode() { return cfg.tab; } // 'workout' | 'route' | 'free'
 
@@ -626,6 +720,11 @@
       root.textContent = '';
       const sceneEl = h('div', { class: 'rd-scene' });
       root.appendChild(sceneEl);
+      root.classList.toggle('rd--wk', !!ride.workout);
+      root.classList.toggle('is-more', moreOpen);
+      // doble toque sobre la vista 3D = cambiar de cámara
+      const dtap = L.createDoubleTap(320, 36);
+      sceneEl.addEventListener('pointerup', (e) => { if (e.button > 0) return; if (dtap.tap(performance.now(), e.clientX, e.clientY)) cycleCamera(); });
       try {
         if (R.Scene3D && R.Scene3D.isSupported()) {
           scene = R.Scene3D.create(sceneEl, ride.route, { quality: 'auto' });
@@ -636,6 +735,7 @@
         say('No pudimos iniciar la vista 3D; usamos el perfil de la ruta.', 'warn');
       }
       const S = stage = {};
+      S.sceneEl = sceneEl;
       const m = (label, unit) => {
         const v = h('b', { class: 'rd-m-v', text: '–' });
         return { el: h('div', { class: 'rd-m' }, [h('span', { class: 'rd-m-l', text: label }), h('span', { class: 'rd-m-row' }, [v, unit ? h('small', { text: unit }) : null])]), v };
@@ -684,6 +784,8 @@
       S.msg = h('div', { class: 'rd-msg', 'aria-live': 'polite' });
       // métricas
       S.mCad = m('Cadencia', 'rpm'); S.mHr = m('FC', 'ppm'); S.mSpd = m('Velocidad', 'km/h'); S.mDist = m('Distancia', 'km');
+      S.distOf = h('i', { class: 'rd-m-of', text: '' });
+      S.mDist.el.querySelector('.rd-m-row').insertBefore(S.distOf, S.mDist.el.querySelector('small'));
       S.mTime = m('Tiempo', ''); S.mGrade = m('Pendiente', '%'); S.mKj = m('Trabajo', 'kJ');
       S.arrow = h('span', { class: 'rd-arrow', text: '→' });
       S.mGrade.el.querySelector('.rd-m-row').insertBefore(S.arrow, S.mGrade.v);
@@ -697,20 +799,31 @@
       S.pauseBtn = cbtn('pause', 'Pausar (Espacio)', () => togglePause());
       S.minusBtn = cbtn('minus', ride.workout ? 'Bajar intensidad 5 % (↓)' : 'Bajar 10 W (↓)', () => adjust(-1));
       S.plusBtn = cbtn('plus', ride.workout ? 'Subir intensidad 5 % (↑)' : 'Subir 10 W (↑)', () => adjust(1));
-      S.camBtn = cbtn('camera', 'Cambiar cámara (C)', () => cycleCamera());
+      S.camBtn = cbtn('camera', 'Cambiar cámara (C)', () => cycleCamera(), 'rd-ctl--cam');
+      S.camCap = h('span', { class: 'rd-ctl-cap', text: '' });
+      S.camBtn.appendChild(S.camCap);
       S.muteBtn = cbtn('spk', 'Silenciar coach (M)', () => toggleMute());
       S.endBtn = cbtn('stop', 'Terminar rodada', () => askFinish(), 'rd-ctl--end');
+      S.pauseBtn.classList.add('rd-o1'); S.plusBtn.classList.add('rd-o2'); S.minusBtn.classList.add('rd-o3');
+      S.muteBtn.classList.add('rd-o6'); S.endBtn.classList.add('rd-o7');
       S.adj = h('span', { class: 'rd-adj', text: '' });
       S.slider = ride.workout ? null : h('input', {
         type: 'range', class: 'rd-slider', min: '0', max: String(Math.round(ftp * 2)), step: '5', value: String(ride.simTarget),
         'aria-label': 'Potencia objetivo del simulador', oninput: (e) => { if (sim) sim.setTargetPower(Number(e.target.value)); },
       });
       const controls = h('div', { class: 'rd-controls' }, [S.pauseBtn, S.minusBtn, S.plusBtn, S.adj, S.camBtn, S.muteBtn, S.endBtn, S.slider]);
+      S.controls = controls;
       S.paused = h('div', { class: 'rd-paused', hidden: true }, [h('b', { text: 'En pausa' }), h('span', { text: 'Espacio para seguir' })]);
       S.count = h('div', { class: 'rd-count', 'aria-live': 'assertive' });
+      // píldora de posiciones (solo móvil) y botón "Más datos" (solo móvil)
+      S.pill = h('button', { type: 'button', class: 'rd-pill', 'aria-expanded': 'false', 'aria-label': 'Posiciones: abrir tabla', onclick: () => toggleBoard() });
+      S.moreBtn = h('button', { type: 'button', class: 'rd-more', 'aria-expanded': moreOpen ? 'true' : 'false', onclick: () => toggleMore() });
+      S.top = h('div', { class: 'rd-top' }, [powerBox, ride.ghost ? S.gap : null, metrics]);
       root.appendChild(h('div', { class: 'rd-hud' }, [
-        powerBox, ride.ghost ? S.gap : null, h('div', { class: 'rd-right' }, [S.board, controls]), S.msg, h('div', { class: 'rd-bottom' }, [metrics, charts]),
+        S.top, S.pill, S.moreBtn, h('div', { class: 'rd-right' }, [S.board, controls]), S.msg, h('div', { class: 'rd-bottom' }, [charts]),
       ]));
+      S.charts = charts;
+      setMoreLabel();
       root.appendChild(S.paused);
       root.appendChild(S.count);
       if (!ride.ghost) S.gap.hidden = true;
@@ -719,6 +832,7 @@
       S.minE = Math.min.apply(null, S.prof.map((p) => p.ele));
       S.maxE = Math.max.apply(null, S.prof.map((p) => p.ele));
       S.profCache = null; S.wkCache = null;
+      syncLayout(true);
       scene.setRiders(sceneRiders());
       scene.render(0.016);
     }
@@ -879,7 +993,8 @@
 
       // métricas
       setText(S.mTime.v, L.fmtTime(r.tS));
-      setText(S.mDist.v, r.mode === 'route' ? L.fmtKm(r.distM) + ' / ' + L.fmtKm(r.route.distanceM) : L.fmtKm(r.distM));
+      setText(S.mDist.v, L.fmtKm(r.distM));
+      setText(S.distOf, r.mode === 'route' ? ' / ' + L.fmtKm(r.route.distanceM) : '');
       setText(S.mSpd.v, (r.v * 3.6).toFixed(1).replace('.', ','));
       setText(S.mGrade.v, r.grade.toFixed(1).replace('.', ',').replace('-', MINUS_CH));
       setText(S.arrow, L.gradeArrow(r.grade));
@@ -902,6 +1017,8 @@
         setText(row.gap, d.pos === 1 ? 'líder' : '+' + Math.round(d.gapS) + ' s');
         row.li.className = d.kind === 'user' ? 'is-user' : d.kind === 'ghost' ? 'is-ghost' : '';
       }
+      setText(S.pill, L.positionPill(ranked, 'user', r.ghost ? r.ghostGap : null));
+      setText(S.camCap, L.CAMERAS[r.camIdx].short);
       if (r.ghost && r.ghostGap != null) {
         const g = r.ghostGap, a = Math.abs(g);
         setText(S.gapN, L.fmtGap(g));
@@ -910,6 +1027,7 @@
       }
 
       // gráficos (≈ 8 Hz)
+      if (nowMs - (r.lastLayout || 0) > 500) { r.lastLayout = nowMs; syncLayout(false); }
       if (nowMs - r.lastChart > 120) { r.lastChart = nowMs; drawProfile(list); if (r.workout) drawWorkoutChart(); }
     }
     const MINUS_CH = L.fmtGap(-5)[0]; // U+2212
@@ -920,7 +1038,7 @@
       if (!S.profCache || S.profCache.key !== key) {
         const off = document.createElement('canvas'); off.width = S.profCv.width; off.height = S.profCv.height;
         const og = off.getContext('2d'); const dpr = off.width / w; og.setTransform(dpr, 0, 0, dpr, 0, 0);
-        const span = Math.max(1, S.maxE - S.minE), top = 14, bot = hh - 4;
+        const span = Math.max(1, S.maxE - S.minE), top = Math.min(14, Math.round(hh * 0.25)), bot = hh - 4;
         const X = (d) => 6 + (d / ride.route.distanceM) * (w - 12), Y = (e) => bot - ((e - S.minE) / span) * (bot - top);
         og.beginPath(); og.moveTo(X(0), hh);
         S.prof.forEach((p) => og.lineTo(X(p.distM), Y(p.ele)));
@@ -1009,7 +1127,9 @@
       if (!ride) return;
       ride.camIdx = (ride.camIdx + 1) % L.CAMERAS.length;
       try { scene.setCameraMode(L.CAMERAS[ride.camIdx].id); } catch (e) { /* fallback 2D */ }
-      if (!scene.isFallback) say('Cámara: ' + L.CAMERAS[ride.camIdx].label, 'info');
+      if (stage) setText(stage.camCap, L.CAMERAS[ride.camIdx].short);
+      if (stage) stage.camBtn.setAttribute('aria-label', 'Cambiar cámara (C). Actual: ' + L.CAMERAS[ride.camIdx].label);
+      if (!scene.isFallback && !isMobile()) say('Cámara: ' + L.CAMERAS[ride.camIdx].label, 'info');
     }
 
     const askState = { wasPaused: false };
@@ -1282,6 +1402,14 @@
     }
     document.addEventListener('keydown', onKey);
     cleanups.push(() => document.removeEventListener('keydown', onKey));
+    const onLayout = () => { if (stage && scene) syncLayout(false); };
+    window.addEventListener('resize', onLayout);
+    window.addEventListener('orientationchange', onLayout);
+    cleanups.push(() => { window.removeEventListener('resize', onLayout); window.removeEventListener('orientationchange', onLayout); });
+    // tocar fuera de la tabla de posiciones la cierra
+    const onOutside = (e) => { if (stage && stage.board.classList.contains('is-open') && !stage.board.contains(e.target) && !stage.pill.contains(e.target)) closeBoard(); };
+    document.addEventListener('pointerdown', onOutside);
+    cleanups.push(() => document.removeEventListener('pointerdown', onOutside));
     const onVis = () => { if (!document.hidden && ride && !ride.over) requestWake(); };
     document.addEventListener('visibilitychange', onVis);
     cleanups.push(() => document.removeEventListener('visibilitychange', onVis));
