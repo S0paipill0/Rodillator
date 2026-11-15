@@ -33,6 +33,7 @@
         grid.appendChild(zonesCard());
         grid.appendChild(remindersCard());
         grid.appendChild(rideCard());
+        grid.appendChild(coachCard());
         grid.appendChild(simulatorCard());
       } else {
         grid.appendChild(section('no-profile', 'Todavía no tienes perfil', 'Crea tu perfil para ver tus zonas y ajustar tu plan. Si tienes un respaldo, puedes importarlo más abajo.',
@@ -197,6 +198,48 @@
             function (v) { return String(v); },
             function (v) { R.store.set({ settings: { botsCount: v } }); ctx.toast(v + (v === 1 ? ' rival' : ' rivales') + ' en pantalla.', 'ok'); },
             'Los rivales azules te acompañan en las rutas. Con 0 ruedas solo.')
+        ]);
+      }
+
+      // ---------- coach de voz ----------
+      function coachCard() {
+        var cs = R.coach.normalizeSettings(settings.coach);
+        var testAudio = null;
+        unsubs.push(function () { if (testAudio) { testAudio.dispose(); testAudio = null; } });
+        function save(patch) {
+          cs = Object.assign({}, cs, patch);
+          R.store.set({ settings: { coach: cs } });
+        }
+        function check(id, label, key) {
+          return el('label', { 'class': 'row', 'for': id }, [
+            el('input', { id: id, type: 'checkbox', checked: cs[key], onchange: function (ev) { save((function (o) { o[key] = ev.target.checked; return o; })({})); } }),
+            ' ' + label
+          ]);
+        }
+        var volOut = el('output', { 'class': 'range-out', 'for': 'f-coach-vol' }, Math.round(cs.volume * 100) + ' %');
+        var vol = el('input', {
+          id: 'f-coach-vol', type: 'range', min: 0, max: 1, step: 0.05, value: cs.volume,
+          oninput: function (ev) { volOut.textContent = Math.round(Number(ev.target.value) * 100) + ' %'; },
+          onchange: function (ev) { save({ volume: Number(ev.target.value) }); }
+        });
+        var verb = el('select', { id: 'f-coach-verb', onchange: function (ev) { save({ verbosity: ev.target.value }); } },
+          [['completo', 'Completo'], ['esencial', 'Esencial'], ['off', 'Silencio']].map(function (o) {
+            return el('option', { value: o[0], selected: cs.verbosity === o[0] }, o[1]);
+          }));
+        return section('set-coach', 'Coach de voz', 'Cuenta regresiva, avisos de intervalos y de pie o sentado mientras rodas.', [
+          el('div', { 'class': 'form-grid' }, [
+            el('div', { 'class': 'field' }, [check('f-coach-voice', 'Voz del coach', 'voice'), check('f-coach-beeps', 'Pitidos', 'beeps')]),
+            el('div', { 'class': 'field' }, [el('label', { 'for': 'f-coach-vol' }, 'Volumen'), el('div', { 'class': 'range-row' }, [vol, volOut])]),
+            el('div', { 'class': 'field' }, [el('label', { 'for': 'f-coach-verb' }, 'Cuánto habla'), verb])
+          ]),
+          el('div', { 'class': 'row' }, el('button', {
+            type: 'button', 'class': 'btn', onclick: function () {
+              if (testAudio) testAudio.dispose();
+              testAudio = R.coach.createAudio({ volume: cs.volume, voice: true, beeps: cs.beeps });
+              testAudio.test();
+            }
+          }, 'Probar voz')),
+          el('p', { 'class': 'hint' }, 'La voz suena sobre tu música: Spotify sigue sonando y baja un momento mientras el coach habla. En iPhone usa Safari actualizado.')
         ]);
       }
 

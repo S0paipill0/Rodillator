@@ -83,6 +83,7 @@
     const s = { durationS: Math.round(durationS), powerPct: powerPct, label: label };
     if (extra && extra.end != null) s.powerPctEnd = extra.end;
     if (extra && extra.cadence != null) s.cadence = extra.cadence;
+    if (extra && extra.position) s.position = extra.position;
     return s;
   }
   const M = 60;
@@ -242,13 +243,13 @@
     mk('tabata', 'Tabata', 'anaerobico',
       'Tres bloques Tabata: 8 repeticiones de 20 segundos a fondo (170 % FTP) y 10 segundos suaves. Cuatro minutos que se sienten eternos, con 6 minutos de descanso entre bloques. Entrega todo en cada serie.',
       flat([[warm(15)],
-        intervals(3, (b, nb) => intervals(8, (i) => [st(20, 170, 'Tabata ' + i + '/8 (bloque ' + b + '/' + nb + ')', { cadence: 105 }), st(10, 40, 'Pausa ' + i + '/8')]),
+        intervals(3, (b, nb) => intervals(8, (i) => [st(20, 170, 'Tabata ' + i + '/8 (bloque ' + b + '/' + nb + ')', { cadence: 105, position: 'pie' }), st(10, 40, 'Pausa ' + i + '/8')]),
           rec(6 * M, 50)),
         [cool(10)]])),
     mk('sprints-neuromusculares', 'Sprints neuromusculares', 'anaerobico',
       'Ocho sprints máximos de 10 segundos con recuperación completa de casi 4 minutos. Potencia pura y reclutamiento muscular, con cero fatiga acumulada. Sal sentado, con cadencia alta y a todo.',
       flat([[warm(20, 45, 75)],
-        intervals(8, (i, n) => st(10, 200, 'Sprint ' + i + '/' + n, { cadence: 120 }), rec(230, 50, 'Recuperación completa')),
+        intervals(8, (i, n) => st(10, 200, 'Sprint ' + i + '/' + n, { cadence: 120, position: 'pie' }), rec(230, 50, 'Recuperación completa')),
         [cool(10)]])),
     mk('anaerobico-8x1', 'Anaeróbico 8×1', 'anaerobico',
       'Ocho esfuerzos de 1 minuto al 135 % de tu FTP con 3 minutos de recuperación. Entrena la capacidad anaeróbica y tu tolerancia al ácido láctico.',
