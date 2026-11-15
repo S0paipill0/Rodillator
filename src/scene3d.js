@@ -2257,27 +2257,54 @@
     var HAIR_GREY = 0x5a5652;
     var helmetGeo = null;
     // casco de bot: casquete de elipsoide sobre la cabeza del modelo (cubre la frente lisa del rostro neutro)
-    function addBotHelmet(obj, team, cast) {
+    function addBotHelmet(obj, team) {
       var hb = cyc.tpl.head;
-      if (!hb) return;
+      if (!hb) return null;
       if (!helmetGeo) helmetGeo = track(new T.SphereGeometry(1, 20, 10, 0, Math.PI * 2, 0, Math.PI * 0.42));
       var mats = cyc.botMats[team.name] || (cyc.botMats[team.name] = {});
       if (!mats.helmet) mats.helmet = track(new T.MeshStandardMaterial({ color: lin(team.jersey), roughness: 0.35, metalness: 0.1 }));
       var ry = 0.15, h = new T.Mesh(helmetGeo, mats.helmet);
       h.name = 'casco';
-      h.castShadow = cast;
       h.scale.set((hb.max.x - hb.min.x) / 2 * 1.2, ry, (hb.max.z - hb.min.z) / 2 * 1.15);
       h.position.set((hb.min.x + hb.max.x) / 2, hb.max.y + 0.02 - ry, (hb.min.z + hb.max.z) / 2);
       obj.add(h);
+      return h;
     }
-    var cyc = { enabled: false, tpl: null, userMats: new Map(), ghostMat: null, botMats: {}, mixers: 0 };
+    var cyc = { enabled: false, failed: false, tpl: null, userMats: new Map(), ghostMat: null, botMats: {}, mixers: 0 };
     var cycPromise = loadCyclistAsset();
     if (cycPromise) {
       cyc.enabled = true;
       cycPromise.then(function (tpl) {
-        if (disposed || !tpl) return;
+        if (disposed) return;
+        if (!tpl) { cyclistFallback(); return; }
         cyc.tpl = tpl;
+        precompileModel();
       });
+    }
+    // el modelo no se pudo leer: vuelven los procedurales con los colores de siempre (bots #7FA7C9)
+    function cyclistFallback() {
+      cyc.enabled = false; cyc.failed = true;
+      for (var i = riderList.length - 1; i >= 0; i--) {
+        if (riderList[i].kind !== 'bot') continue;
+        removeRider(riderList[i]);                    // setRiders los vuelve a crear con los materiales por defecto
+        riderList.splice(i, 1);
+      }
+    }
+    // compila de una vez los programas de todas las variantes presentes (usuario, fantasma, equipos de bots)
+    // para que la primera aparicion de cada una no provoque un tiron en plena rodada
+    function precompileModel() {
+      var tmp = new T.Group(), seen = {}, i, st, key;
+      for (i = 0; i < riderList.length; i++) {
+        st = riderList[i];
+        key = st.kind === 'bot' ? 'bot:' + (st.team ? st.team.name : '') : st.kind;
+        if (seen[key]) continue;
+        seen[key] = true;
+        tmp.add(buildModelObject(st).obj);
+      }
+      if (!tmp.children.length) return;
+      scene.add(tmp);
+      try { renderer.compile(scene, camera); } catch (e) { /* sin compilar: se hara al dibujar */ }
+      scene.remove(tmp);
     }
     function cycUserMat(orig) {
       var m = cyc.userMats.get(orig);
@@ -2316,21 +2343,31 @@
       }
       return mats[key];
     }
-    function createModelInstance(st) {
-      var tpl = cyc.tpl, CY = R.cyclist;
-      var obj = tpl.root.clone(true);                     // comparte geometrias
-      var shadows = modelShadows(st);
+    // clon del modelo con los materiales de la variante del ciclista (comparte geometrias con la plantilla)
+    function buildModelObject(st) {
+      var tpl = cyc.tpl, CY = R.cyclist, team = st.team || CY.botTeam(-1, st.id);
+      var obj = tpl.root.clone(true), meshes = [];
       obj.traverse(function (o) {
         if (!o.isMesh) return;
         var role = tpl.roles.get(o.material) || 'other';
-        if (st.kind === 'ghost') o.material = cycGhostMat();
+        if (st.kind === 'ghost') { o.material = cycGhostMat(); o.renderOrder = 1; }   // despues de los demas transparentes
         else if (st.kind === 'bot') {
-          o.material = cycBotMat(o.material, role, st.team || CY.botTeam(-1, st.id));
+          o.material = cycBotMat(o.material, role, team);
           if (role === 'lenses') o.visible = false;
         } else o.material = cycUserMat(o.material);
-        o.castShadow = shadows.cast; o.receiveShadow = shadows.receive;
+        o.castShadow = false; o.receiveShadow = st.kind === 'user';
+        meshes.push(o);
       });
-      if (st.kind === 'bot') addBotHelmet(obj, st.team || CY.botTeam(-1, st.id), shadows.cast);
+      if (st.kind === 'bot') {
+        var h = addBotHelmet(obj, team);
+        if (h) meshes.push(h);
+      }
+      return { obj: obj, meshes: meshes };
+    }
+    function createModelInstance(st) {
+      var tpl = cyc.tpl;
+      var built = buildModelObject(st);
+      var obj = built.obj;
       var holder = new T.Group();
       holder.rotation.y = -Math.PI / 2;                   // modelo: avance -Z, derecha +X -> marco del ciclista: +x adelante, +z derecha
       holder.add(obj);
@@ -2344,7 +2381,7 @@
         cyc.mixers++;
       }
       st.model = {
-        holder: holder, obj: obj, mixer: mixer, action: action, cast: shadows.cast,
+        holder: holder, obj: obj, meshes: built.meshes, mixer: mixer, action: action, cast: false,
         wheels: [obj.getObjectByName('__rueda_rear'), obj.getObjectByName('__rueda_front')].filter(Boolean)
       };
     }
@@ -2357,29 +2394,44 @@
       st.lod = 'proc';
       st.body.visible = true;
     }
-    // sombras: el usuario proyecta y recibe; los bots proyectan solo en calidad alta; el fantasma, nada
-    function modelShadows(st) {
-      if (st.kind === 'user') return { cast: true, receive: true };
-      return { cast: st.kind === 'bot' && level === 'alta', receive: false };
+    // distancia a la camara y orden de los bots por cercania (sin crear objetos)
+    function rankRiders() {
+      var cp = camera.position, i, j, a, n = riderList.length;
+      for (i = 0; i < n; i++) {
+        a = riderList[i].root.position;
+        var dx = a.x - cp.x, dy = a.y - cp.y, dz = a.z - cp.z;
+        riderList[i].camD = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      }
+      for (i = 0; i < n; i++) {
+        a = riderList[i];
+        if (a.kind !== 'bot') { a.botRank = -1; continue; }
+        var r = 0;
+        for (j = 0; j < n; j++) {
+          var b = riderList[j];
+          if (j !== i && b.kind === 'bot' && (b.camD < a.camD || (b.camD === a.camD && j < i))) r++;
+        }
+        a.botRank = r;
+      }
     }
-    var _camToRider = new T.Vector3();
     function updateRiderModel(st, dt) {
       var CY = R.cyclist;
-      if (!CY) return;
-      var d = cyc.tpl ? _camToRider.copy(st.root.position).sub(camera.position).length() : Infinity;
-      var want = CY.chooseLod({ distM: d, kind: st.kind, quality: level, prev: st.lod, modelReady: !!cyc.tpl });
+      var d = st.camD;
+      var want = CY.chooseLod(d, st.kind, level, st.lod, !!cyc.tpl, st.botRank);
       if (want !== st.lod) {
         if (want === 'model' && !st.model) createModelInstance(st);
         if (st.model) st.model.holder.visible = want === 'model';
         st.body.visible = want !== 'model';
         st.lod = want;
       }
-      if (st.lod !== 'model') return;
-      var md = st.model;
-      var cast = modelShadows(st).cast;
+      if (st.lod !== 'model') {
+        if (st.model && CY.shouldReleaseModel(st.kind, d)) removeModelInstance(st);   // bot muy lejos: fuera clon y mixer
+        return;
+      }
+      var md = st.model, k;
+      var cast = Q.shadows && CY.castsShadow(st.kind, level, d);
       if (cast !== md.cast) {
         md.cast = cast;
-        md.obj.traverse(function (o) { if (o.isMesh) o.castShadow = cast; });
+        for (k = 0; k < md.meshes.length; k++) md.meshes[k].castShadow = cast;
       }
       if (md.action) {
         var ts = CY.cadenceTimeScale(CY.riderCadence(st.kind, st.cadenceRpm, st.speed, st.id), st.speed);
@@ -2387,7 +2439,12 @@
         md.mixer.update(dt);
       }
       var roll = CY.wheelOmega(st.speed, cyc.tpl.wheelR) * dt;
-      if (roll) for (var k = 0; k < md.wheels.length; k++) md.wheels[k].rotation.x -= roll;   // avance hacia -Z del modelo
+      if (roll) {
+        for (k = 0; k < md.wheels.length; k++) {
+          var w = md.wheels[k].rotation;
+          w.x = CY.wrapAngle(w.x - roll);                  // avance hacia -Z del modelo; acotado a (-2pi, 2pi)
+        }
+      }
     }
 
     var riderList = [], riderById = {}, seenToken = 0, simTime = 0, botSeq = 0;
@@ -2432,9 +2489,11 @@
         id: r.id, kind: kind, root: root, body: body, team: team, token: 0, distM: r.distM, lastD: r.distM, lastT: simTime, speed: 0,
         phase: Math.random() * Math.PI * 2, tx: 0, ty: 0, tz: 0, tq: new T.Quaternion(), hx: 1, hz: 0, fresh: true,
         wheels: [], thighs: [], shins: [], feet: [], labelText: null, label: null,
-        cadenceRpm: null, lod: 'proc', model: null
+        cadenceRpm: null, lod: 'proc', model: null, camD: 0, botRank: -1
       };
-      function part(g, mat) { var me = new T.Mesh(g, mat); me.castShadow = kind !== 'ghost'; body.add(me); return me; }
+      // con modelo glTF, los bots procedurales (lejanos o fuera del presupuesto) no proyectan sombra
+      var procCast = kind !== 'ghost' && !(kind === 'bot' && cyc.enabled);
+      function part(g, mat) { var me = new T.Mesh(g, mat); me.castShadow = procCast; body.add(me); return me; }
       var i, w;
       for (i = 0; i < 2; i++) {                                    // ruedas
         w = part(geo.wheel, m.tire);
@@ -2668,6 +2727,17 @@
     resize();
 
     var monitor = createFrameMonitor();
+    // conteo de la pasada de sombras: renderer.info se reinicia despues de ella (r149), asi que drawCalls/triangles
+    // son solo la pasada principal; aqui se mide la de sombras por separado
+    var shadowPass = { calls: 0, triangles: 0 };
+    (function () {
+      var sm = renderer.shadowMap, orig = sm.render;
+      sm.render = function (lights, sc, cam) {
+        var ir = renderer.info.render, c0 = ir.calls, t0 = ir.triangles;
+        orig.call(this, lights, sc, cam);
+        shadowPass.calls = ir.calls - c0; shadowPass.triangles = ir.triangles - t0;
+      };
+    })();
     function setQuality(q) {
       if (disposed) return;
       qualityMode = QUALITIES.indexOf(q) >= 0 ? q : 'auto';
@@ -2686,7 +2756,7 @@
       var nModel = 0, nProc = 0, i;
       for (i = 0; i < riderList.length; i++) { if (riderList[i].lod === 'model') nModel++; else nProc++; }
       return {
-        model: cyc.tpl ? 'listo' : (cyc.enabled ? 'cargando' : 'sin modelo'),
+        model: cyc.tpl ? 'listo' : (cyc.failed ? 'error' : (cyc.enabled ? 'cargando' : 'sin modelo')),
         withModel: nModel, procedural: nProc, mixers: cyc.mixers,
         meshesPerRider: cyc.tpl ? cyc.tpl.meshes : 0, trianglesPerRider: cyc.tpl ? Math.round(cyc.tpl.triangles) : 0
       };
@@ -2695,6 +2765,8 @@
       var info = renderer.info.render;
       return {
         fps: Math.round(10 / monitor.avg()) / 10, drawCalls: info.calls, triangles: info.triangles,
+        shadowDrawCalls: shadowPass.calls, shadowTriangles: shadowPass.triangles,
+        totalDrawCalls: info.calls + shadowPass.calls,
         instances: instanceCount(), quality: level, mode: qualityMode,
         hiTiles: hiTiles.size, vegChunks: vegLayer.map.size, grassChunks: grassLayer.map.size, landcover: lc.synthetic ? 'sintetica' : 'ruta',
         cyclist: cyclistStats()
@@ -2710,6 +2782,7 @@
       if (monitor.feed(dtS) && qualityMode === 'auto' && level !== 'baja') applyLevel(downgradeQuality(level));
 
       var kr = 1 - Math.exp(-dt * 18), i, st;
+      if (cyc.enabled) rankRiders();
       var cx = camera.position.x, cy = camera.position.y, cz = camera.position.z;
       // vertical (celular): se evita el amontonamiento de etiquetas sobre el ciclista del usuario
       var portrait = compactView(), uSt = userState(), nearBot = null, nearBotD = 1e9;
@@ -2729,7 +2802,7 @@
           p.x += ddx * kr; p.y += ddy * kr; p.z += ddz * kr;
           st.root.quaternion.slerp(st.tq, kr);
         }
-        if (cyc.enabled) updateRiderModel(st, dt);
+        if (cyc.enabled && R.cyclist) updateRiderModel(st, dt);
         if (st.speed > 0.05 && st.lod !== 'model') {
           var rev = clamp(st.speed / 8 * 1.4, 0, 2.2);              // rev/s de cadencia segun velocidad
           st.phase += rev * 2 * Math.PI * dt;
