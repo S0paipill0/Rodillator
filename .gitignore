@@ -3,3 +3,4 @@ node_modules/
 cache/
 __pycache__/
 dist/
+assets/private/
