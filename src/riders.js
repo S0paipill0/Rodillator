@@ -91,6 +91,121 @@
     return bots;
   }
 
+
+  // ---------- pelotón con ataques ----------
+  const RANK = { tranquilo: 0, constante: 1, atacante: 2, fuerte: 3 };
+  const PEL_ELASTIC_GAIN = 0.1;   // (m/s de ajuste) por metro de error de posición
+  const PEL_MAX_ACCEL = 1.5;      // m/s² máximo de cambio de velocidad de un bot (sin saltos visibles)
+  const PEL_MIN_ATTACK_START_S = 240;  // sin ataques en los primeros 4 min
+  const PEL_NO_ATTACK_LAST_M = 2000;   // ni en los últimos 2 km de la ruta
+  const PEL_CAUGHT_S = 5, PEL_DROPPED_S = 10;
+
+  // Pelotón: bots de createBots repartidos en 3 grupos (principal 60 %, escapada 20 %, rezagados 20 %).
+  // Fuera de ataques, un elástico suave mantiene a cada bot cerca de su puesto respecto al usuario
+  // (principal ±35 m, escapada 80–220 m delante, rezagados 60–180 m detrás). Cada ~6–12 min el grupo
+  // principal ataca: su potencia sube 25–35 % durante 30–90 s sin elástico (se escapa del usuario) y luego
+  // vuelve. gapS > 0 = el grupo principal va por delante del usuario.
+  // state.groupIds = { principal: [ids], escapada: [ids], rezagados: [ids] }; state.phase: 'idle' | 'start' | 'end'.
+  // Callbacks: opts.onAttack o peloton.onAttack = fn(phase, info), phase 'start'|'end'|'caught'|'dropped'.
+  function createPeloton(opts) {
+    opts = opts || {};
+    const count = Math.min(20, Math.max(8, Math.round(Number(opts.count) || 14)));
+    const { ftp, massKg, route } = opts;
+    const seed = opts.seed == null ? 1 : opts.seed;
+    const every = opts.attackEveryMin || [6, 12];
+    const durR = opts.attackDurS || [30, 90];
+    const bots = createBots({ count: count, ftp: ftp, massKg: massKg, route: route, seed: seed });
+    const rand = rng((seed >>> 0) ^ 0x9e3779b9);
+    const uni = (lo, hi) => lo + rand() * (hi - lo);
+
+    // reparto de grupos: los más fuertes a la escapada, los más tranquilos atrás
+    const order = bots.map((b, i) => ({ b, i })).sort((x, y) => (RANK[y.b.personality] - RANK[x.b.personality]) || (x.i - y.i));
+    const nEsc = Math.max(1, Math.round(count * 0.2));
+    const nRez = Math.max(1, Math.round(count * 0.2));
+    const groupIds = { principal: [], escapada: [], rezagados: [] };
+    const cfg = new Map();
+    order.forEach((o, k) => {
+      const group = k < nEsc ? 'escapada' : (k >= count - nRez ? 'rezagados' : 'principal');
+      o.b.group = group;
+      groupIds[group].push(o.b.id);
+      const off = group === 'principal' ? uni(-35, 35) : group === 'escapada' ? uni(80, 220) : -uni(60, 180);
+      cfg.set(o.b.id, {
+        off, boost: group === 'escapada' ? uni(0.02, 0.05) : 0,
+        wobA: uni(4, 10), wobP: uni(25, 60), wobPh: uni(0, 6.283), jitter: uni(-0.03, 0.03),
+      });
+    });
+    const mainBots = bots.filter((b) => b.group === 'principal');
+
+    const state = { attacking: false, phase: 'idle', endsAtS: null, startsAtS: null, nextAttackAtS: 0, attackCount: 0, groupIds, gapS: 0 };
+    const nextInterval = () => uni(every[0], every[1]) * 60;
+    let nextStart = Math.max(PEL_MIN_ATTACK_START_S, nextInterval());
+    state.nextAttackAtS = nextStart;
+    let boost = 1, userSpeed = 8.33, lastUserD = null, initialized = false;
+    const peloton = { bots, state, onAttack: opts.onAttack || null };
+
+    const emit = (phase, info) => { if (typeof peloton.onAttack === 'function') peloton.onAttack(phase, info); };
+    const mainMean = () => mainBots.reduce((a, b) => a + b.distM, 0) / mainBots.length;
+    const gapNow = () => (mainMean() - lastUserD) / Math.max(2, userSpeed);
+
+    peloton.update = function (dt, tS, userDistM) {
+      if (!(dt > 0)) return;
+      const ud = Number(userDistM) || 0;
+      if (lastUserD != null) userSpeed += (Math.max(0, (ud - lastUserD) / dt) - userSpeed) * Math.min(1, dt / 3);
+      if (state.phase === 'end') state.phase = 'idle';
+      const first = !initialized;
+      lastUserD = ud;
+      const end = route.distanceM;
+
+      // ataques
+      if (!state.attacking && tS >= nextStart && ud <= end - PEL_NO_ATTACK_LAST_M) {
+        const dur = uni(durR[0], durR[1]);
+        boost = 1 + uni(0.25, 0.35);
+        state.attacking = true; state.phase = 'start'; state.startsAtS = tS; state.endsAtS = tS + dur;
+        state.attackCount++;
+        nextStart = tS + nextInterval();
+        state.nextAttackAtS = nextStart;
+        emit('start', { phase: 'start', tS, durS: dur, endsAtS: state.endsAtS, powerBoostPct: Math.round((boost - 1) * 100), gapS: state.gapS });
+      }
+      const attackingNow = state.attacking;
+
+      bots.forEach((bot) => {
+        const c = cfg.get(bot.id);
+        const target = ud + c.off + c.wobA * Math.sin((2 * Math.PI * tS) / c.wobP + c.wobPh);
+        if (first) { // colocación inicial (antes de que se vea el pelotón)
+          bot.distM = Math.min(end, Math.max(0, target));
+          bot.speedMps = Math.max(0, userSpeed);
+        }
+        const prevD = bot.distM, prevV = bot.speedMps;
+        bot.update(dt, tS); // calcula bot.powerW (y avanza); lo recalculamos con la potencia del pelotón
+        if (prevD >= end) { bot.distM = end; bot.speedMps = 0; return; }
+        const mult = attackingNow && bot.group === 'principal' ? boost + c.jitter : 1;
+        const s = R.routes.sampleAt(route, prevD);
+        let v = R.physics.step({ v: prevV, powerW: bot.powerW * mult, gradePct: s.gradePct, massKg: massKg, altitudeM: s.ele, dt });
+        v *= 1 + c.boost;
+        if (!(attackingNow && bot.group === 'principal')) {
+          const lim = 0.5 * v + 2;
+          v = Math.max(0, v + Math.min(lim, Math.max(-lim, PEL_ELASTIC_GAIN * (target - prevD))));
+        }
+        v = prevV + Math.min(PEL_MAX_ACCEL * dt, Math.max(-PEL_MAX_ACCEL * dt, v - prevV));
+        bot.distM = Math.min(end, Math.max(0, prevD + ((prevV + v) / 2) * dt));
+        bot.speedMps = v;
+      });
+      initialized = true;
+      state.gapS = gapNow();
+
+      if (state.attacking && tS >= state.endsAtS) {
+        const gap = state.gapS;
+        state.attacking = false; state.phase = 'end';
+        const info = { tS, gapS: gap, durS: tS - state.startsAtS };
+        emit('end', Object.assign({ phase: 'end' }, info));
+        if (gap < PEL_CAUGHT_S) emit('caught', Object.assign({ phase: 'caught' }, info));
+        else if (gap > PEL_DROPPED_S) emit('dropped', Object.assign({ phase: 'dropped' }, info));
+        state.endsAtS = null; // phase queda en 'end' hasta el siguiente update
+      }
+    };
+    return peloton;
+  }
+
   // ---------- mejores marcas ----------
   function splitsFromSamples(samples) {
     const out = [];
@@ -145,5 +260,5 @@
     });
   }
 
-  R.riders = { createGhost, createBots, splitsFromSamples, updateBest, ranking };
+  R.riders = { createGhost, createBots, createPeloton, splitsFromSamples, updateBest, ranking };
 })(typeof window !== 'undefined' ? (window.R = window.R || {}) : (globalThis.R = globalThis.R || {}));
