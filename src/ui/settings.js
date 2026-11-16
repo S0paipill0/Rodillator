@@ -20,6 +20,7 @@
     render: function (container, ctx) {
       var unsubs = [];
       settingsView._unsubs = unsubs;
+      var sensorsInst = null;   // tarjeta de sensores (se destruye al redibujar o salir)
       var s = R.store.get();
       var profile = s.profile, settings = s.settings;
       container.appendChild(el('header', { 'class': 'view-head' }, el('div', null, [el('h1', null, 'Ajustes'), el('p', null, 'Tu perfil, tus zonas y cómo quieres rodar.')])));
@@ -33,6 +34,9 @@
         grid.appendChild(zonesCard());
         grid.appendChild(remindersCard());
         grid.appendChild(rideCard());
+        grid.appendChild(groupRideCard());
+        grid.appendChild(sensorsCardBox());
+        grid.appendChild(trainerCard());
         grid.appendChild(coachCard());
         grid.appendChild(simulatorCard());
       } else {
@@ -194,10 +198,6 @@
             function (v) { return '+' + U.fmtNum(v, 1) + ' %'; },
             function (v) { R.store.set({ settings: { ghostBoost: v } }); ctx.toast('Fantasma ajustado a +' + U.fmtNum(v, 1) + ' %.', 'ok'); },
             'El fantasma dorado recorre la ruta a tu mejor marca más este porcentaje. Con 0 % iguala tu mejor tiempo.'),
-          range('f-bots', 'Ciclistas rivales (bots)', 0, 12, 1, settings.botsCount == null ? 6 : settings.botsCount,
-            function (v) { return String(v); },
-            function (v) { R.store.set({ settings: { botsCount: v } }); ctx.toast(v + (v === 1 ? ' rival' : ' rivales') + ' en pantalla.', 'ok'); },
-            'Los rivales azules te acompañan en las rutas. Con 0 ruedas solo.'),
           el('div', { 'class': 'field' }, [
             el('label', { 'for': 'f-gfx' }, 'Calidad gráfica'),
             el('select', { id: 'f-gfx', 'aria-describedby': 'f-gfx-h', onchange: function (ev) {
@@ -209,6 +209,93 @@
             el('div', { 'class': 'hint', id: 'f-gfx-h' }, 'Paisaje 3D: árboles, pasto con viento y sombras. Automática usa Media en el celular y Alta en el computador, y baja sola si la escena va lenta.')
           ])
         ]);
+      }
+
+      // ---------- rodada: pelotón e hidratación ----------
+      function groupRideCard() {
+        var bots = R.store.normalizeBotsCount ? R.store.normalizeBotsCount(settings.botsCount) : 14;
+        var hy = R.store.normalizeHydration ? R.store.normalizeHydration(settings.hydration) : { enabled: true, everyMin: 12, durationS: 45 };
+        function saveHyd(patch) {
+          hy = R.store.normalizeHydration(Object.assign({}, hy, patch));
+          R.store.set({ settings: { hydration: hy } });   // objeto completo: set fusiona settings a un nivel
+          sync();
+        }
+        var every = rangeField('f-hyd-every', 'Cada cuántos minutos', 10, 15, 1, hy.everyMin,
+          function (v) { return v + ' min'; }, function (v) { saveHyd({ everyMin: v }); ctx.toast('Hidratación cada ' + v + ' min.', 'ok'); },
+          'Entre 10 y 15 minutos. En los entrenamientos la pausa se mueve al siguiente tramo suave para no cortar un intervalo.');
+        var dur = rangeField('f-hyd-dur', 'Duración de la pausa', 30, 60, 5, hy.durationS,
+          function (v) { return v + ' s'; }, function (v) { saveHyd({ durationS: v }); ctx.toast('Pausas de ' + v + ' s.', 'ok'); },
+          'Pedaleo suave mientras bebes: el cronómetro no se detiene.');
+        var box = el('div', null, [every, dur]);
+        function sync() { box.hidden = !hy.enabled; }
+        sync();
+        return section('set-group', 'Rodada', 'Pelotón con ataques y pausas para hidratarte.', [
+          rangeField('f-bots', 'Ciclistas en el pelotón', 8, 20, 1, bots,
+            function (v) { return String(v); },
+            function (v) { R.store.set({ settings: { botsCount: v } }); ctx.toast(v + ' ciclistas en el pelotón.', 'ok'); },
+            'Te acompañan en las rutas. Cada 6 a 12 minutos el grupo ataca y la app te sugiere subir un nivel la palanca para seguirlo.'),
+          el('label', { 'class': 'row', 'for': 'f-hyd-on', style: { 'margin-bottom': '14px' } }, [
+            el('input', { id: 'f-hyd-on', type: 'checkbox', checked: hy.enabled, onchange: function (ev) {
+              saveHyd({ enabled: ev.target.checked });
+              ctx.toast(ev.target.checked ? 'Pausas de hidratación activadas.' : 'Pausas de hidratación desactivadas.', 'ok');
+            } }),
+            ' Pausas de hidratación'
+          ]),
+          box
+        ]);
+      }
+
+      // ---------- sensores (tarjeta de src/ui/sensors-card.js) ----------
+      function sensorsCardBox() {
+        var box = el('div', { 'class': 'sn-box' });
+        if (!R.ui.sensorsCard) return box;
+        sensorsInst = R.ui.sensorsCard(box, { store: R.store });
+        var inst = sensorsInst;
+        unsubs.push(function () { inst.destroy(); });   // al redibujar Ajustes o salir de la vista
+        return box;
+      }
+
+      // ---------- rodillo mecánico ----------
+      function trainerCard() {
+        var SS = R.sensorsSettings;
+        var t = SS.normalizeTrainer(settings.trainer);
+        function save(patch) {
+          t = SS.normalizeTrainer(Object.assign({}, SS.normalizeTrainer(R.store.get().settings.trainer), patch));
+          R.store.set({ settings: { trainer: t } });
+          if (sensorsInst) sensorsInst.redraw();
+        }
+        var level = el('select', { id: 'f-flat', 'aria-describedby': 'f-flat-h', onchange: function (ev) {
+          save({ flatLevel: Number(ev.target.value) }); ctx.toast('Nivel en llano: ' + t.flatLevel + '.', 'ok');
+        } }, [1, 2, 3, 4, 5, 6, 7, 8].map(function (n) { return el('option', { value: n, selected: t.flatLevel === n }, String(n)); }));
+        var fmt = function (v) { return U.fmtNum ? U.fmtNum(v, 2) : String(v).replace('.', ','); };
+        var scale = rangeField('f-pscale', 'Factor de potencia', 0.7, 1.3, 0.01, t.powerScale, function (v) { return '×' + fmt(v); },
+          function (v) { save({ powerScale: v }); ctx.toast('Factor de potencia ×' + fmt(t.powerScale) + '.', 'ok'); },
+          'Multiplica la potencia estimada. Súbelo si la app te da menos vatios de los que sientes (o de los que marca un medidor de potencia) y bájalo si te da más. 1,00 = modelo sin ajustar.');
+        // la tarjeta de sensores también edita estos valores: se mantienen al día
+        unsubs.push(R.store.subscribe(function (st) {
+          var nt = SS.normalizeTrainer(st.settings && st.settings.trainer);
+          if (document.activeElement !== level && String(level.value) !== String(nt.flatLevel)) level.value = String(nt.flatLevel);
+          var input = scale.querySelector('input'), out = scale.querySelector('output');
+          if (input && document.activeElement !== input && Number(input.value) !== nt.powerScale) { input.value = nt.powerScale; if (out) out.textContent = '×' + fmt(nt.powerScale); }
+        }));
+        return section('set-trainer', 'Rodillo', 'Tu rodillo es mecánico de 8 posiciones: la app no mueve la palanca, te sugiere el nivel (1 a 8) y la voz anuncia cada cambio.', [
+          el('div', { 'class': 'form-grid' }, [
+            el('div', { 'class': 'field' }, [el('label', { 'for': 'f-flat' }, 'Nivel en llano'), level,
+              el('div', { 'class': 'hint', id: 'f-flat-h' }, 'Posición de la palanca que se siente como rodar en plano (3 por defecto). Las sugerencias en subida y bajada se calculan desde aquí.')]),
+            scale
+          ]),
+          el('p', { 'class': 'hint' }, 'Con el sensor de velocidad conectado, la potencia se estima con la velocidad de la rueda y el nivel de la palanca (modelo genérico de rodillo de 8 niveles: es una estimación, no una medición). Si no sigues una sugerencia, marca en la rodada el nivel real con los botones − y + junto al nivel.')
+        ]);
+      }
+
+      function rangeField(id, label, min, max, step, val, fmt, onSave, hint) {
+        var out = el('output', { 'class': 'range-out', 'for': id }, fmt(val));
+        var input = el('input', {
+          id: id, type: 'range', min: min, max: max, step: step, value: val, 'aria-describedby': id + '-h',
+          oninput: function (ev) { out.textContent = fmt(Number(ev.target.value)); },
+          onchange: function (ev) { onSave(Number(ev.target.value)); }
+        });
+        return el('div', { 'class': 'field' }, [el('label', { 'for': id }, label), el('div', { 'class': 'range-row' }, [input, out]), el('div', { 'class': 'hint', id: id + '-h' }, hint)]);
       }
 
       // ---------- coach de voz ----------
@@ -256,7 +343,7 @@
       // ---------- simulador de potencia ----------
       function simulatorCard() {
         return section('set-sim', 'Potencia', null,
-          el('p', null, 'Rodillator usa el simulador de potencia: controla tu esfuerzo con las flechas o los botones +/−.'));
+          el('p', null, 'Sin sensores, Rodillator usa el simulador de potencia: controla tu esfuerzo con las flechas o los botones +/−. Con el sensor de velocidad conectado, la potencia se estima con la velocidad de tu rueda y el nivel del rodillo.'));
       }
 
       // ---------- Strava ----------

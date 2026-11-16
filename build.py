@@ -10,8 +10,8 @@ import sys
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 SCRIPT_ORDER = [
-    'store', 'training', 'physics', 'trainer', 'routes', 'riders', 'vendor/gltfloader', 'cyclist', 'scene3d', 'devices', 'integrations', 'voicepack', 'coach',
-    'ui/shell', 'ui/onboarding', 'ui/plan', 'ui/routes', 'ui/settings', 'ui/ride', 'ui/stats', 'app',
+    'sensors-settings', 'store', 'training', 'physics', 'trainer', 'routes', 'riders', 'vendor/gltfloader', 'cyclist', 'scene3d', 'devices', 'integrations', 'voicepack', 'coach',
+    'ui/shell', 'ui/onboarding', 'ui/plan', 'ui/routes', 'ui/sensors-card', 'ui/settings', 'ui/ride', 'ui/stats', 'app',
 ]
 MAX_HTML_BYTES = 14 * 1024 * 1024
 # Modelo 3D del ciclista (privado: lleva el rostro del usuario; assets/private/ esta en .gitignore).

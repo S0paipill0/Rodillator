@@ -14,7 +14,10 @@
       profile: null,
       plan: null,
       activities: [],
-      settings: { reminderTime: '19:00', reminderDays: [1, 3, 5], ghostBoost: 0, botsCount: 6, units: 'metric', graphicsQuality: 'auto', lastTimed: { durationMin: 45, focus: 'auto' }, coach: { voice: true, beeps: true, volume: 1.6, verbosity: 'completo', natural: true, volumeV2: true } },
+      settings: { reminderTime: '19:00', reminderDays: [1, 3, 5], ghostBoost: 0, botsCount: 14, units: 'metric', graphicsQuality: 'auto', lastTimed: { durationMin: 45, focus: 'auto' }, coach: { voice: true, beeps: true, volume: 1.6, verbosity: 'completo', natural: true, volumeV2: true },
+        hydration: { enabled: true, everyMin: 12, durationS: 45 },
+        trainer: { type: 'mecanico-8', wheelCircMm: 2050, flatLevel: 3, powerScale: 1 },
+        sensors: { lastSpeedId: null, lastHrId: null } },
       bests: {}
     };
   }
@@ -36,6 +39,46 @@
     c.natural = c.natural === undefined ? d.natural : !!c.natural;
     c.volumeV2 = true;
     return c;
+  }
+
+  // Ciclistas del pelotón: entero 8..20; ausente o inválido -> 14 (por defecto). Un valor guardado menor
+  // que 8 (p. ej. el antiguo 6 o 0) sube a 8: el pelotón necesita grupo para los ataques.
+  var BOTS_MIN = 8, BOTS_MAX = 20, BOTS_DEFAULT = 14;
+  function normalizeBotsCount(v) {
+    var n = (v === null || v === undefined || v === '' || typeof v === 'boolean') ? NaN : Math.round(Number(v));
+    return isFinite(n) ? Math.min(BOTS_MAX, Math.max(BOTS_MIN, n)) : BOTS_DEFAULT;
+  }
+
+  // Pausas de hidratación: { enabled (def. true), everyMin 10..15 (def. 12), durationS 30..60 (def. 45) }.
+  function normalizeHydration(raw) {
+    var d = { enabled: true, everyMin: 12, durationS: 45 };
+    var h = isObj(raw) ? raw : {};
+    function n(v, lo, hi, def) {
+      var x = (v === null || v === undefined || v === '' || typeof v === 'boolean') ? NaN : Math.round(Number(v));
+      return isFinite(x) ? Math.min(hi, Math.max(lo, x)) : def;
+    }
+    return {
+      enabled: h.enabled === undefined ? d.enabled : !!h.enabled,
+      everyMin: n(h.everyMin, 10, 15, d.everyMin),
+      durationS: n(h.durationS, 30, 60, d.durationS)
+    };
+  }
+
+  // trainer y sensors: R.sensorsSettings (src/sensors-settings.js, cargado antes que store.js).
+  // Sin ese módulo (p. ej. pruebas que cargan store.js solo) se dejan tal cual.
+  function normalizeSensorSettings(settings) {
+    return (R.sensorsSettings && typeof R.sensorsSettings.normalize === 'function') ? R.sensorsSettings.normalize(settings) : settings;
+  }
+
+  // Todas las claves de ajustes con forma conocida (en carga, importación y set).
+  function normalizeSettings(st, migrate) {
+    var out = normalizeSensorSettings(st);
+    out.coach = normalizeCoach(out.coach, migrate);
+    out.graphicsQuality = normalizeGraphicsQuality(out.graphicsQuality);
+    out.lastTimed = normalizeLastTimed(out.lastTimed);
+    out.botsCount = normalizeBotsCount(out.botsCount);
+    out.hydration = normalizeHydration(out.hydration);
+    return out;
   }
 
   var TIMED_FOCUS = ['hoy', 'recuperacion', 'resistencia', 'tempo', 'sweetspot', 'umbral', 'vo2', 'sprints', 'sorpresa', 'auto'];
@@ -68,9 +111,7 @@
       settings: Object.assign(d.settings, isObj(raw.settings) ? raw.settings : {}),
       bests: isObj(raw.bests) ? raw.bests : {}
     };
-    s.settings.coach = normalizeCoach(s.settings.coach, true);
-    s.settings.graphicsQuality = normalizeGraphicsQuality(s.settings.graphicsQuality);
-    s.settings.lastTimed = normalizeLastTimed(s.settings.lastTimed);
+    s.settings = normalizeSettings(s.settings, true);
     return s;
   }
 
@@ -248,10 +289,7 @@
     Object.keys(patch).forEach(function (k) {
       if (k === 'schemaVersion' || k === 'updatedAt') return;
       if (k === 'settings' && isObj(patch.settings)) {
-        next.settings = Object.assign({}, state.settings, patch.settings);
-        next.settings.graphicsQuality = normalizeGraphicsQuality(next.settings.graphicsQuality);
-        next.settings.lastTimed = normalizeLastTimed(next.settings.lastTimed);
-        next.settings.coach = normalizeCoach(next.settings.coach, false);
+        next.settings = normalizeSettings(Object.assign({}, state.settings, patch.settings), false);
       }
       else next[k] = patch[k];
     });
@@ -311,6 +349,8 @@
     isPersistent: isPersistent,
     load: function () { load(); notify(); return state; },
     normalizeGraphicsQuality: normalizeGraphicsQuality,
+    normalizeBotsCount: normalizeBotsCount,
+    normalizeHydration: normalizeHydration,
     _compact: compact,
     _defaults: defaults
   };

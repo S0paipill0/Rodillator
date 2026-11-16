@@ -28,7 +28,7 @@ test('sin localStorage funciona solo en memoria', () => {
   assert.deepEqual(st.activities, []);
   assert.deepEqual(st.bests, {});
   assert.equal(st.schemaVersion, 1);
-  assert.deepEqual(st.settings, { reminderTime: '19:00', reminderDays: [1, 3, 5], ghostBoost: 0, botsCount: 6, units: 'metric', graphicsQuality: 'auto', lastTimed: { durationMin: 45, focus: 'auto' }, coach: { voice: true, beeps: true, volume: 1.6, verbosity: 'completo', natural: true, volumeV2: true } });
+  assert.deepEqual(st.settings, { reminderTime: '19:00', reminderDays: [1, 3, 5], ghostBoost: 0, botsCount: 14, units: 'metric', graphicsQuality: 'auto', lastTimed: { durationMin: 45, focus: 'auto' }, coach: { voice: true, beeps: true, volume: 1.6, verbosity: 'completo', natural: true, volumeV2: true }, hydration: { enabled: true, everyMin: 12, durationS: 45 }, trainer: { type: 'mecanico-8', wheelCircMm: 2050, flatLevel: 3, powerScale: 1 }, sensors: { lastSpeedId: null, lastHrId: null } });
   S.set({ profile: { name: 'Ana' } });
   S.flush();
   assert.equal(S.get().profile.name, 'Ana');
@@ -38,15 +38,15 @@ test('set fusiona superficial, settings a 1 nivel, y notifica a suscriptores', (
   S.reset();
   const calls = [];
   const un = S.subscribe((s) => calls.push(s.settings.botsCount));
-  S.set({ settings: { botsCount: 3 } });
-  assert.equal(S.get().settings.botsCount, 3);
+  S.set({ settings: { botsCount: 10 } });
+  assert.equal(S.get().settings.botsCount, 10);
   assert.equal(S.get().settings.reminderTime, '19:00'); // se conserva
   S.set({ activities: [{ id: 'a1' }] });
   S.set({ activities: [{ id: 'a2' }] });
   assert.deepEqual(S.get().activities, [{ id: 'a2' }]); // reemplazo superficial
   assert.equal(calls.length, 3);
   un();
-  S.set({ settings: { botsCount: 9 } });
+  S.set({ settings: { botsCount: 11 } });
   assert.equal(calls.length, 3);
 });
 
@@ -55,13 +55,13 @@ test('persiste en localStorage con debounce de 300 ms', async () => {
   globalThis.localStorage = ls;
   S.reset(); S.flush(); ls.writes = 0;
   S.set({ profile: { name: 'Beto' } });
-  S.set({ settings: { units: 'metric', botsCount: 2 } });
+  S.set({ settings: { units: 'metric', botsCount: 12 } });
   assert.equal(ls.writes, 0);
   await wait(450);
   assert.equal(ls.writes, 1);
   const saved = JSON.parse(ls.m.get('rodillator.v1'));
   assert.equal(saved.profile.name, 'Beto');
-  assert.equal(saved.settings.botsCount, 2);
+  assert.equal(saved.settings.botsCount, 12);
   // recarga desde storage
   S.set({ profile: null }); S.flush();
   S.set({ profile: { name: 'otro' } }); // no flush: storage conserva null
@@ -114,13 +114,13 @@ test('QuotaExceeded: recorta más y reintenta una vez', () => {
 
 test('exportJSON / importJSON ida y vuelta y validación', () => {
   S.reset();
-  S.set({ profile: { name: 'D', ftp: 220 }, activities: [{ id: 'x', samples: [] }], settings: { botsCount: 1 } });
+  S.set({ profile: { name: 'D', ftp: 220 }, activities: [{ id: 'x', samples: [] }], settings: { botsCount: 13 } });
   const txt = S.exportJSON();
   S.reset();
   assert.equal(S.get().profile, null);
   S.importJSON(txt);
   assert.equal(S.get().profile.ftp, 220);
-  assert.equal(S.get().settings.botsCount, 1);
+  assert.equal(S.get().settings.botsCount, 13);
   assert.equal(S.get().settings.units, 'metric');
   assert.throws(() => S.importJSON('no es json'), /JSON/);
   assert.throws(() => S.importJSON('[1,2]'), /formato/);
@@ -144,14 +144,14 @@ function fakeDb(initial) {
 
 test('attachDb: adopta el remoto si es más reciente', async () => {
   S.reset();
-  const remote = { updatedAt: Date.now() + 100000, state: { profile: { name: 'Remoto' }, activities: [], settings: { botsCount: 4 } } };
+  const remote = { updatedAt: Date.now() + 100000, state: { profile: { name: 'Remoto' }, activities: [], settings: { botsCount: 15 } } };
   const db = fakeDb({ 'data/users/u1/state/main': remote });
   let notified = 0;
   S.subscribe(() => notified++);
   const adopted = await S.attachDb(db, 'u1');
   assert.equal(adopted, true);
   assert.equal(S.get().profile.name, 'Remoto');
-  assert.equal(S.get().settings.botsCount, 4);
+  assert.equal(S.get().settings.botsCount, 15);
   assert.ok(notified >= 1);
 });
 
@@ -225,7 +225,7 @@ test('settings.coach: estados guardados sin coach o con coach parcial se complet
   assert.deepEqual(S.get().settings.coach, { voice: true, beeps: true, volume: 1.6, verbosity: 'completo', natural: true, volumeV2: true });
   S.importJSON(JSON.stringify({ schemaVersion: 1, settings: { coach: { volume: 0.4 } } }));
   assert.deepEqual(S.get().settings.coach, { voice: true, beeps: true, volume: 0.4, verbosity: 'completo', natural: true, volumeV2: true });
-  assert.equal(S.get().settings.botsCount, 6);
+  assert.equal(S.get().settings.botsCount, 14, 'sin botsCount guardado: 14 por defecto');
 });
 
 test('graphicsQuality: default auto, normaliza valores inválidos al cargar y al guardar', () => {

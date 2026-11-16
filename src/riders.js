@@ -101,6 +101,9 @@
   const PEL_MIN_ATTACK_START_S = 240;  // sin ataques en los primeros 4 min
   const PEL_NO_ATTACK_LAST_M = 2000;   // ni en los últimos 2 km de la ruta
   const PEL_CAUGHT_S = 5, PEL_DROPPED_S = 10;
+  // tope de la velocidad comandada del grupo atacante: 1,8 × v_usuario + 1 m/s (en bajadas largas la física
+  // con potencia ×boost los dispararía lejos del usuario; así el ataque sigue siendo alcanzable)
+  const PEL_ATTACK_MAX_FRAC = 1.8, PEL_ATTACK_MAX_ABS = 1;
 
   // Pelotón: bots de createBots repartidos en 3 grupos (principal 60 %, escapada 20 %, rezagados 20 %).
   // Fuera de ataques, un elástico suave mantiene a cada bot cerca de su puesto respecto al usuario
@@ -198,6 +201,7 @@
           // el grupo atacante rueda libre con su potencia ×boost (física)
           const s = R.routes.sampleAt(route, prevD);
           vCmd = R.physics.step({ v: prevV, powerW: bot.powerW, gradePct: s.gradePct, massKg: massKg, altitudeM: s.ele, dt });
+          vCmd = Math.min(vCmd, PEL_ATTACK_MAX_FRAC * userSpeed + PEL_ATTACK_MAX_ABS);
         } else {
           // objetivo de velocidad (no aceleración): ritmo del usuario + corrección proporcional al error
           // de posición, acotada. Es un sistema de primer orden (constante de tiempo 1/G), estable e
