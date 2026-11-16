@@ -1,6 +1,8 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert');
+const fs = require('node:fs');
+const path = require('node:path');
 require('../src/coach.js');
 const C = globalThis.R.coach;
 
@@ -581,4 +583,57 @@ test('voz natural: test() espera la decodificación y reproduce clips del pack',
   a.test();
   await settle(); await settle();
   assert.ok(f.started.length >= 5);
+});
+
+test('voz natural: setEnabled({voice:false}) y stop() detienen los clips programados y liberan la cola', async () => {
+  const f = packEnv();
+  const a = C.createAudio({ env: f.env, now: f.now });
+  a.unlock(); await settle();
+  a.say('Hidratación: toma agua, 45 segundos', { priority: C.PRIORITY.HYDRATE });
+  const first = f.started.slice();
+  assert.ok(first.length >= 2);
+  a.setEnabled({ voice: false });
+  assert.ok(first.every((s) => s[0].stopped), 'voice:false detiene los nodos');
+  a.setEnabled({ voice: true });
+  const n0 = f.started.length;
+  a.say('Pausa', { priority: 1 });
+  const s2 = f.started.slice(n0);
+  assert.ok(s2.length >= 1 && s2[0][1] <= f.ctxs()[0].currentTime + 0.05, 'la cola quedó libre (nextFree = ahora)');
+  a.stop();
+  assert.ok(s2.every((s) => s[0].stopped), 'stop() detiene lo programado (pausa)');
+});
+
+test('voz natural: caché de AudioBuffer a nivel de módulo; precarga vamos y 1..3 primero', async () => {
+  const f = packEnv();
+  const order = [];
+  const Base = f.env.AudioContext;
+  f.env.AudioContext = class extends Base {
+    decodeAudioData(ab) { order.push(1); return super.decodeAudioData(ab); }
+  };
+  // clips distinguibles para conocer el orden de decodificación
+  const keys = Object.keys(f.env.R_VOICE.clips);
+  const seq = [];
+  keys.forEach((k) => { f.env.R_VOICE.clips[k] = Buffer.from(k).toString('base64'); });
+  f.env.AudioContext = class extends Base {
+    decodeAudioData(ab) { seq.push(Buffer.from(ab).toString()); return Promise.resolve({ duration: 0.5 }); }
+  };
+  const a1 = C.createAudio({ env: f.env, now: f.now });
+  a1.unlock();
+  assert.deepStrictEqual(seq.slice(0, 4), ['vamos', 'n1', 'n2', 'n3']);
+  await settle(); await settle();
+  const total = seq.length;
+  assert.strictEqual(total, keys.length);
+  a1.dispose();
+  const a2 = C.createAudio({ env: f.env, now: f.now });
+  a2.unlock(); await settle();
+  assert.strictEqual(seq.length, total, 'otra instancia reutiliza los buffers sin decodificar');
+  assert.strictEqual(a2.say('Tres, dos, uno', { priority: C.PRIORITY.COUNT }), true);
+  assert.strictEqual(f.spoken.filter((u) => u.text.trim()).length, 0, 'sin respaldo a speechSynthesis');
+});
+
+test('ride.js pasa natural a createAudio y a setEnabled; la pausa llama audio.stop()', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'ui', 'ride.js'), 'utf8');
+  assert.match(src, /createAudio\(\{[^}]*natural: cs\.natural/);
+  assert.match(src, /audio\.setEnabled\(\{[^}]*natural: cs\.natural/);
+  assert.match(src, /audio\.stop\(\)/);
 });

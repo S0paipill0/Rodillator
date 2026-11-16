@@ -26,6 +26,7 @@ python3 tools/bake_routes.py   # regenera data/routes (requiere red a AWS y EOX)
 - Relieve: Copernicus DEM GLO-30 © ESA/DLR.
 - Imagen: Sentinel-2 cloudless by EOX — CC BY-NC-SA 4.0 (uso no comercial).
 - Traza de Alpe d'Huez: paquete R `rayshaderanimate` (GPL ≥ 2).
+- Voz del coach: modelo Piper es_MX "claude" (high), dataset HirCoir/Piper-TTS-Spanish (https://huggingface.co/spaces/HirCoir/Piper-TTS-Spanish), licencia Apache-2.0 según su MODEL_CARD; los clips de `data/voice/es-mx.json` se generan por síntesis con `tools/bake_voice.py`.
 - Las rutas chilenas tienen trazado aproximado, generado sobre el relieve real.
 
 ## Limitaciones actuales

@@ -93,6 +93,8 @@ test('data/voice/es-mx.json (si existe) trae exactamente las claves del vocabula
   if (!fs.existsSync(f)) return;
   const j = JSON.parse(fs.readFileSync(f, 'utf8'));
   assert.ok(j.voice && j.license);
+  assert.strictEqual(j.license, 'Apache-2.0'); // MODEL_CARD de es_MX-claude-high (dataset HirCoir/Piper-TTS-Spanish)
+  assert.match(j.source, /HirCoir\/Piper-TTS-Spanish/);
   assert.deepStrictEqual(Object.keys(j.clips).sort(), V.VOCAB.map((e) => e.key).sort());
   assert.ok(fs.statSync(f).size <= 700 * 1024, 'pack demasiado grande');
 });

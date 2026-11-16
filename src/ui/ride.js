@@ -804,7 +804,7 @@
       // coach: el audio se desbloquea aquí (clic en Comenzar) por la política de autoplay
       if (audio) { try { audio.dispose(); } catch (e) { /* nada */ } }
       const cs = R.coach.normalizeSettings(settings.coach);
-      audio = R.coach.createAudio({ volume: cs.volume, voice: cs.voice, beeps: cs.beeps });
+      audio = R.coach.createAudio({ volume: cs.volume, voice: cs.voice, beeps: cs.beeps, natural: cs.natural });
       audio.unlock();
       muted = false;
       coach = R.coach.createCoach({ say: (t, o) => audio.say(t, o), beep: (k) => audio.beep(k), now: () => performance.now(), verbosity: cs.verbosity });
@@ -1238,6 +1238,7 @@
       stage.paused.hidden = !ride.paused;
       stage.pauseBtn.firstChild.innerHTML = ICON[ride.paused ? 'play' : 'pause'];
       stage.pauseBtn.setAttribute('aria-label', ride.paused ? 'Reanudar (Espacio)' : 'Pausar (Espacio)');
+      if (audio && ride.paused) { try { audio.stop(); } catch (e) { /* nada */ } } // corta lo programado antes del aviso de pausa
       if (coach) coach.event(ride.paused ? 'pause' : 'resume');
     }
 
@@ -1245,7 +1246,7 @@
       if (!audio || !stage) return;
       muted = !muted;
       const cs = R.coach.normalizeSettings(settings.coach);
-      audio.setEnabled({ voice: !muted && cs.voice, beeps: !muted && cs.beeps });
+      audio.setEnabled({ voice: !muted && cs.voice, beeps: !muted && cs.beeps, natural: cs.natural });
       stage.muteBtn.firstChild.innerHTML = ICON[muted ? 'spkOff' : 'spk'];
       stage.muteBtn.setAttribute('aria-label', muted ? 'Activar coach (M)' : 'Silenciar coach (M)');
       stage.muteBtn.setAttribute('aria-pressed', muted ? 'true' : 'false');

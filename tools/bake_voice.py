@@ -59,7 +59,7 @@ def main():
             to_mp3(wav, mp3)
             with open(mp3, 'rb') as f:
                 clips[e['key']] = base64.b64encode(f.read()).decode('ascii')
-    data = {'voice': 'es_MX-claude-high (Piper)', 'license': 'MIT', 'clips': clips}
+    data = {'voice': 'es_MX-claude-high (Piper)', 'license': 'Apache-2.0', 'source': 'https://huggingface.co/spaces/HirCoir/Piper-TTS-Spanish', 'clips': clips}
     os.makedirs(os.path.dirname(args.out), exist_ok=True)
     with open(args.out, 'w', encoding='utf-8') as f:
         json.dump(data, f, ensure_ascii=False, separators=(',', ':'))

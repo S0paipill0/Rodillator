@@ -281,6 +281,15 @@
     return best;
   }
 
+  // Caché de AudioBuffer a nivel de módulo, por paquete (clips): sobrevive a dispose()/createAudio y se comparte
+  var PACK_CACHE = typeof WeakMap === 'function' ? new WeakMap() : null;
+  var PRELOAD = ['vamos', 'n1', 'n2', 'n3']; // cuenta regresiva: se decodifica primero
+  function packCache(clips) {
+    var c = PACK_CACHE && PACK_CACHE.get(clips);
+    if (!c) { c = { buffers: {}, promise: null }; if (PACK_CACHE) PACK_CACHE.set(clips, c); }
+    return c;
+  }
+
   function createAudio(opts) {
     var o = opts || {};
     var env = o.env || (typeof window !== 'undefined' ? window : {});
@@ -293,7 +302,8 @@
     var st = { volume: o.volume == null ? DEFAULTS.volume : clampVol(o.volume), voice: o.voice !== false, beeps: o.beeps !== false, natural: o.natural !== false };
     var pack = o.pack !== undefined ? o.pack : (env.R_VOICE || null);
     // voz pregrabada: buffers decodificados una vez; cadena master Gain -> DynamicsCompressor -> destino
-    var buffers = {}, packState = pack && pack.clips ? 'idle' : 'none', packPromise = null, master = null, active = [], nextFree = 0;
+    var shared = pack && pack.clips ? packCache(pack.clips) : { buffers: {}, promise: null };
+    var buffers = shared.buffers, packState = pack && pack.clips ? 'idle' : 'none', packPromise = null, master = null, active = [], nextFree = 0;
     var ctx = null, voice = null, dog = null, speakingSince = null, disposed = false, deferred = [], deferTimer = null;
 
     function loadVoices() {
@@ -364,6 +374,7 @@
     }
     function decode(key) {
       return new Promise(function (resolve) {
+        if (buffers[key]) { resolve(); return; }
         try {
           var ab = b64ToBytes(pack.clips[key]);
           var done = function (buf) { if (buf) buffers[key] = buf; resolve(); };
@@ -372,11 +383,26 @@
         } catch (e) { resolve(); }
       });
     }
+    function missingKeys() { return Object.keys(pack.clips).filter(function (k) { return !buffers[k]; }); }
+    function updateState() {
+      if (disposed) return;
+      packState = Object.keys(buffers).length ? 'ready' : 'failed';
+      if (packState === 'failed' && env.console && env.console.warn) { try { env.console.warn('Voz pregrabada: no se pudo decodificar el paquete; se usa la voz del sistema'); } catch (e) { /* nada */ } }
+    }
     function loadPack() {
       if (packState !== 'idle' || !ctx || !ctx.decodeAudioData) return;
+      var missing = missingKeys();
+      if (!missing.length) { packState = 'ready'; return; }
       packState = 'loading';
-      var keys = Object.keys(pack.clips);
-      packPromise = Promise.all(keys.map(decode)).then(function () { packState = Object.keys(buffers).length ? 'ready' : 'failed'; });
+      if (!shared.promise) {
+        // primero "vamos" y 1..3 para que la cuenta regresiva no caiga al respaldo; el resto después
+        var first = PRELOAD.filter(function (k) { return pack.clips[k] && !buffers[k]; });
+        var rest = missing.filter(function (k) { return first.indexOf(k) < 0; });
+        var head = Promise.all(first.map(decode));
+        head.then(function () { if (!disposed && Object.keys(buffers).length && packState === 'loading') packState = 'ready'; });
+        shared.promise = head.then(function () { return Promise.all(rest.map(decode)); }).then(function () { shared.promise = null; }, function () { shared.promise = null; });
+      }
+      packPromise = shared.promise.then(updateState);
     }
 
     // Reproduce clips pregrabados uno tras otro; false si no se puede (→ respaldo speechSynthesis)
@@ -393,8 +419,7 @@
         var now = ctx.currentTime;
         active = active.filter(function (a) { return a.end > now; });
         if (priority >= PRI.COUNT && active.length) { // la cuenta regresiva corta lo que esté sonando
-          active.forEach(function (a) { try { a.src.stop(); } catch (e) { /* nada */ } });
-          active = []; nextFree = now;
+          stopClips();
         }
         var t = Math.max(now + 0.02, nextFree);
         bufs.forEach(function (b) {
@@ -406,6 +431,19 @@
         nextFree = t;
         return true;
       } catch (e) { return false; }
+    }
+
+    // detiene los clips programados (también los futuros) y deja la cola libre
+    function stopClips() {
+      active.forEach(function (a) { try { a.src.stop(); } catch (e) { /* nada */ } });
+      active = [];
+      nextFree = ctx ? ctx.currentTime : 0;
+    }
+    function stopAll() {
+      stopClips();
+      if (synth) { try { synth.cancel(); } catch (e) { /* nada */ } }
+      if (deferTimer && env.clearTimeout) env.clearTimeout(deferTimer);
+      deferTimer = null; deferred.length = 0;
     }
 
     function flushDeferred() {
@@ -469,10 +507,10 @@
     }
 
     return {
-      unlock: unlock, say: say, beep: beep,
+      unlock: unlock, say: say, beep: beep, stop: stopAll,
       setVolume: function (v) { st.volume = clampVol(v); if (master) { try { master.gain.value = st.volume; } catch (e) { /* nada */ } } },
       setEnabled: function (e) {
-        if (e && e.voice !== undefined) { st.voice = !!e.voice; if (!st.voice && synth) { try { synth.cancel(); } catch (x) { /* nada */ } } }
+        if (e && e.voice !== undefined) { st.voice = !!e.voice; if (!st.voice) stopAll(); }
         if (e && e.beeps !== undefined) st.beeps = !!e.beeps;
         if (e && e.natural !== undefined) st.natural = !!e.natural;
       },
