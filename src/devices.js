@@ -4,6 +4,10 @@
   var FTMS = 0x1826, INDOOR_BIKE_DATA = 0x2AD2, FTMS_CONTROL_POINT = 0x2AD9;
   var CYCLING_POWER = 0x1818, CYCLING_POWER_MEASUREMENT = 0x2A63;
   var HEART_RATE = 0x180D, HEART_RATE_MEASUREMENT = 0x2A37;
+  var CSC = 0x1816, CSC_MEASUREMENT = 0x2A5B;
+  var BATTERY = 0x180F, BATTERY_LEVEL = 0x2A19;
+  var DEFAULT_WHEEL_MM = 2070;
+  var CSC_IDLE_MS = 3000;   // sin eventos de rueda/biela durante 3 s => velocidad/cadencia 0
 
   var MSG_BLOCKED = 'El navegador bloqueó Bluetooth en esta vista. Abre Rodillator en una pestaña de Chrome o Edge.';
 
@@ -57,6 +61,74 @@
     return { powerW: powerW, cadenceRpm: cadenceRpm, state: state };
   }
 
+  // CSC (0x2A5B). prevState: el `state` devuelto por la lectura anterior (o null).
+  // opts: { wheelCircMm = 2070, nowMs = Date.now() }.
+  // Devuelve { speedKph|null, cadenceRpm|null, wheelRevs, crankRevs, mode, state }.
+  //   wheelRevs/crankRevs: contadores crudos del sensor (null si el flag no viene).
+  //   mode: 'speed' (solo rueda) | 'cadence' (solo biela) | 'both'.
+  // Los tiempos de evento van en 1/1024 s y se desbordan en uint16; las revoluciones de rueda en uint32.
+  function csc(dv, prevState, opts) {
+    opts = opts || {};
+    var circMm = opts.wheelCircMm > 0 ? opts.wheelCircMm : DEFAULT_WHEEL_MM;
+    var nowMs = opts.nowMs != null ? opts.nowMs : Date.now();
+    var flags = dv.getUint8(0);
+    var hasWheel = !!(flags & 0x01), hasCrank = !!(flags & 0x02);
+    var o = 1;
+    var prev = prevState || {};
+    var st = {
+      wheelRevs: prev.wheelRevs != null ? prev.wheelRevs : null, wheelTime: prev.wheelTime != null ? prev.wheelTime : null,
+      crankRevs: prev.crankRevs != null ? prev.crankRevs : null, crankTime: prev.crankTime != null ? prev.crankTime : null,
+      speedKph: prev.speedKph != null ? prev.speedKph : null, cadenceRpm: prev.cadenceRpm != null ? prev.cadenceRpm : null,
+      lastWheelMs: prev.lastWheelMs != null ? prev.lastWheelMs : null, lastCrankMs: prev.lastCrankMs != null ? prev.lastCrankMs : null
+    };
+    var wheelRevs = null, crankRevs = null;
+    if (hasWheel) {
+      wheelRevs = dv.getUint32(o, true); var wt = dv.getUint16(o + 4, true); o += 6;
+      if (prev.wheelRevs == null) {
+        st.lastWheelMs = nowMs;
+      } else {
+        var dTime = (wt - prev.wheelTime + 65536) % 65536;
+        var dRev = (wheelRevs - prev.wheelRevs) >>> 0;
+        if (dTime > 0 && dRev > 0) {
+          st.speedKph = dRev * (circMm / 1000) / (dTime / 1024) * 3.6;
+          st.lastWheelMs = nowMs;
+        } else if (dRev === 0 && dTime === 0) {
+          if (st.lastWheelMs == null) st.lastWheelMs = nowMs;
+          if (nowMs - st.lastWheelMs > CSC_IDLE_MS) st.speedKph = 0;   // sin evento nuevo: conserva y luego 0
+        } else {
+          st.lastWheelMs = nowMs;
+        }
+      }
+      st.wheelRevs = wheelRevs; st.wheelTime = wt;
+    }
+    if (hasCrank) {
+      crankRevs = dv.getUint16(o, true); var ct = dv.getUint16(o + 2, true); o += 4;
+      if (prev.crankRevs == null) {
+        st.lastCrankMs = nowMs;
+      } else {
+        var cdT = (ct - prev.crankTime + 65536) % 65536;
+        var cdR = (crankRevs - prev.crankRevs + 65536) % 65536;
+        if (cdT > 0 && cdR > 0) {
+          st.cadenceRpm = cdR / (cdT / 1024) * 60;
+          st.lastCrankMs = nowMs;
+        } else if (cdR === 0 && cdT === 0) {
+          if (st.lastCrankMs == null) st.lastCrankMs = nowMs;
+          if (nowMs - st.lastCrankMs > CSC_IDLE_MS) st.cadenceRpm = 0;
+        } else {
+          st.lastCrankMs = nowMs;
+        }
+      }
+      st.crankRevs = crankRevs; st.crankTime = ct;
+    }
+    return {
+      speedKph: hasWheel ? st.speedKph : null,
+      cadenceRpm: hasCrank ? st.cadenceRpm : null,
+      wheelRevs: wheelRevs, crankRevs: crankRevs,
+      mode: hasWheel && hasCrank ? 'both' : (hasCrank ? 'cadence' : 'speed'),
+      state: st
+    };
+  }
+
   function heartRate(dv) {
     var flags = dv.getUint8(0);
     return { hrBpm: (flags & 0x01) ? dv.getUint16(1, true) : dv.getUint8(1) };
@@ -106,9 +178,17 @@
   // ---------- Dispositivos reales ----------
 
   var emitter = createEmitter();
-  var latest = { trainer: {}, powermeter: {}, hr: {} };
-  var conns = { trainer: null, powermeter: null, hr: null };   // { device, server, chars... }
+  var latest = { trainer: {}, powermeter: {}, hr: {}, csc: {} };
+  var conns = { trainer: null, powermeter: null, hr: null, csc: null };   // { device, server, chars... }
   var cpState = null;
+  var cscState = null;
+  var wheelCircMm = null;      // fijado por setWheelCirc / opciones de connectSpeedCadence
+  var cscMode = null;          // 'speed' | 'cadence' | 'both' | null
+  var RETRY_DELAYS_MS = [1000, 2000, 4000];   // 3 reintentos con espera creciente
+  var cfg = { retryDelaysMs: RETRY_DELAYS_MS, setTimeout: function (f, ms) { return setTimeout(f, ms); } };
+  var remembered = {};         // kind -> { id, name, device } (sesión)
+  var meta = {};               // kind -> { name, id, state, batteryPct, retries }
+  var closing = {};            // kind -> true si la desconexión fue pedida por el usuario
   var writeChain = Promise.resolve();
 
   function pick() {
@@ -118,39 +198,130 @@
 
   function publish(source) {
     var t = latest.trainer, p = latest.powermeter, h = latest.hr;
+    var c = latest.csc;
     emitter.emit('data', {
       powerW: pick(p.powerW, t.powerW),
-      cadenceRpm: pick(p.cadenceRpm, t.cadenceRpm),
-      speedKph: pick(t.speedKph),
+      cadenceRpm: pick(p.cadenceRpm, c.cadenceRpm, t.cadenceRpm),
+      speedKph: pick(c.speedKph, t.speedKph),
       hrBpm: pick(h.hrBpm, t.hrBpm),
       source: source
     });
+  }
+
+  function setMeta(kind, patch) {
+    meta[kind] = Object.assign(meta[kind] || { name: '', id: null, state: 'disconnected', batteryPct: null, retries: 0 }, patch);
+    emitter.emit('status', status());
+  }
+
+  function status() {
+    return Object.keys(meta).map(function (k) {
+      var m = meta[k];
+      return { kind: k, name: m.name, id: m.id, state: m.state, batteryPct: m.batteryPct, retries: m.retries, mode: k === 'csc' ? cscMode : null };
+    });
+  }
+
+  function rememberDevice(kind, device) {
+    remembered[kind] = { id: device.id || null, name: device.name || '', device: device };
+    try { if (typeof sessionStorage !== 'undefined') sessionStorage.setItem('rodillator.sensor.' + kind, device.id || ''); } catch (e) { /* sin sessionStorage */ }
+  }
+
+  function clearLatest(kind) {
+    latest[kind] = {};
+    if (kind === 'powermeter') cpState = null;
+    if (kind === 'csc') { cscState = null; cscMode = null; }
+  }
+
+  async function readBattery(kind, server) {
+    try {
+      var bs = await server.getPrimaryService(BATTERY);
+      var bc = await bs.getCharacteristic(BATTERY_LEVEL);
+      var v = await bc.readValue();
+      setMeta(kind, { batteryPct: v.getUint8(0) });
+    } catch (e) { /* Battery Service opcional */ }
+  }
+
+  // Conecta GATT, suscribe notificaciones y registra el manejo de desconexión (con reintentos).
+  async function attach(device, kind, serviceUuid, charUuid, onValue) {
+    var server = await device.gatt.connect();
+    var service = await server.getPrimaryService(serviceUuid);
+    var ch = await service.getCharacteristic(charUuid);
+    ch.addEventListener('characteristicvaluechanged', function (ev) { onValue(ev.target.value); });
+    await ch.startNotifications();
+    conns[kind] = { device: device, server: server, service: service, ch: ch, spec: [serviceUuid, charUuid, onValue] };
+    setMeta(kind, { name: device.name || '', id: device.id || null, state: 'connected', retries: 0 });
+    readBattery(kind, server);
+    return conns[kind];
+  }
+
+  var wired = typeof WeakSet !== 'undefined' ? new WeakSet() : null;
+  function wireDisconnect(device, kind) {
+    if (wired) { if (wired.has(device)) return; wired.add(device); }
+    device.addEventListener('gattserverdisconnected', function () {
+      var spec = conns[kind] && conns[kind].spec;
+      conns[kind] = null;
+      clearLatest(kind);
+      emitter.emit('disconnected', { kind: kind });
+      if (closing[kind] || !spec || (kind !== 'csc' && kind !== 'hr')) { setMeta(kind, { state: 'disconnected' }); return; }
+      retryConnect(device, kind, spec, 0);
+    });
+  }
+
+  function retryConnect(device, kind, spec, attempt) {
+    var delays = cfg.retryDelaysMs;
+    if (attempt >= delays.length) { setMeta(kind, { state: 'disconnected', retries: attempt }); emitter.emit('reconnectFailed', { kind: kind }); return; }
+    setMeta(kind, { state: 'reconnecting', retries: attempt + 1 });
+    cfg.setTimeout(async function () {
+      if (closing[kind] || conns[kind]) return;
+      try {
+        await attach(device, kind, spec[0], spec[1], spec[2]);
+        emitter.emit('reconnected', { kind: kind });
+      } catch (e) { retryConnect(device, kind, spec, attempt + 1); }
+    }, delays[attempt]);
   }
 
   async function openDevice(options, kind, serviceUuid, charUuid, onValue) {
     var n = nav();
     if (!n || !n.bluetooth) throw new Error(MSG_BLOCKED);
     var device = null;
+    closing[kind] = false;
     try {
       device = await n.bluetooth.requestDevice(options);
-      var server = await device.gatt.connect();
-      var service = await server.getPrimaryService(serviceUuid);
-      var ch = await service.getCharacteristic(charUuid);
-      ch.addEventListener('characteristicvaluechanged', function (ev) { onValue(ev.target.value); });
-      await ch.startNotifications();
-      device.addEventListener('gattserverdisconnected', function () {
-        conns[kind] = null;
-        latest[kind] = {};
-        if (kind === 'powermeter') cpState = null;
-        emitter.emit('disconnected', { kind: kind });
-      });
-      conns[kind] = { device: device, server: server, service: service, ch: ch };
-      return { name: device.name || '', kind: kind, service: service, server: server };
+      await attach(device, kind, serviceUuid, charUuid, onValue);
+      wireDisconnect(device, kind);
+      rememberDevice(kind, device);
+      return { name: device.name || '', id: device.id || null, kind: kind, service: conns[kind].service, server: conns[kind].server };
     } catch (e) {
       try { if (device && device.gatt && device.gatt.connected) device.gatt.disconnect(); } catch (e2) { /* ya desconectado */ }
-      if (kind === 'powermeter') cpState = null;
+      conns[kind] = null;
+      clearLatest(kind);
       throw translateError(e);
     }
+  }
+
+  // "Reconectar": reutiliza el dispositivo recordado en la sesión (por objeto o, si el navegador lo permite, por device.id).
+  async function reconnect(kind) {
+    var rem = remembered[kind];
+    if (!rem) throw new Error('No hay un sensor recordado en esta sesión. Conéctalo de nuevo.');
+    if (conns[kind]) return { name: rem.name, id: rem.id, kind: kind };
+    var spec = kind === 'csc' ? [CSC, CSC_MEASUREMENT, onCscValue] : kind === 'hr' ? [HEART_RATE, HEART_RATE_MEASUREMENT, onHrValue] : null;
+    if (!spec) throw new Error('Este tipo de sensor no admite reconexión rápida.');
+    var device = rem.device;
+    var n = nav();
+    if (!device && n && n.bluetooth && typeof n.bluetooth.getDevices === 'function') {
+      var list = await n.bluetooth.getDevices();
+      device = list.filter(function (d) { return d.id === rem.id; })[0];
+    }
+    if (!device) throw new Error('No se encontró el sensor. Conéctalo de nuevo.');
+    closing[kind] = false;
+    try {
+      await attach(device, kind, spec[0], spec[1], spec[2]);
+      wireDisconnect(device, kind);
+    } catch (e) {
+      conns[kind] = null;
+      setMeta(kind, { state: 'disconnected' });
+      throw translateError(e);
+    }
+    return { name: rem.name, id: rem.id, kind: kind };
   }
 
   // ---- Control Point FTMS: comandos serializados con espera de la indicación de respuesta ----
@@ -241,13 +412,51 @@
     return { name: info.name, kind: 'powermeter' };
   }
 
+  function onHrValue(dv) { latest.hr = heartRate(dv); publish('hr'); }
+
+  function currentWheelMm() {
+    if (wheelCircMm > 0) return wheelCircMm;
+    try {
+      var st = R.store && R.store.get && R.store.get();
+      var w = st && st.settings && st.settings.trainer && st.settings.trainer.wheelCircMm;
+      if (w > 0) return w;
+    } catch (e) { /* sin store */ }
+    return DEFAULT_WHEEL_MM;
+  }
+
+  function setWheelCirc(mm) { if (mm > 0) wheelCircMm = Number(mm); }
+
+  function onCscValue(dv) {
+    var r = csc(dv, cscState, { wheelCircMm: currentWheelMm() });
+    cscState = r.state;
+    var first = cscMode !== r.mode;
+    cscMode = r.mode;
+    latest.csc = { speedKph: r.speedKph, cadenceRpm: r.cadenceRpm };
+    if (first) emitter.emit('cscMode', { mode: r.mode, text: cscModeText(r.mode) });
+    publish('csc');
+  }
+
+  function cscModeText(mode) {
+    return mode === 'cadence' ? 'Sensor en modo cadencia' : mode === 'both' ? 'Sensor en modo velocidad y cadencia' : 'Sensor en modo velocidad';
+  }
+
+  // Velocidad/cadencia (Magene S3+ u otro CSC 0x1816). Opciones: { wheelCircMm }.
+  async function connectSpeedCadence(opts) {
+    if (opts && opts.wheelCircMm > 0) setWheelCirc(opts.wheelCircMm);
+    cscState = null; cscMode = null;
+    var info = await openDevice(
+      { filters: [{ services: [CSC] }], optionalServices: [CSC, BATTERY] },
+      'csc', CSC, CSC_MEASUREMENT, onCscValue
+    );
+    return { name: info.name, id: info.id, kind: 'csc' };
+  }
+
   async function connectHeartRate() {
     var info = await openDevice(
-      { filters: [{ services: [HEART_RATE] }] },
-      'hr', HEART_RATE, HEART_RATE_MEASUREMENT,
-      function (dv) { latest.hr = heartRate(dv); publish('hr'); }
+      { filters: [{ services: [HEART_RATE] }], optionalServices: [HEART_RATE, BATTERY] },
+      'hr', HEART_RATE, HEART_RATE_MEASUREMENT, onHrValue
     );
-    return { name: info.name, kind: 'hr' };
+    return { name: info.name, id: info.id, kind: 'hr' };
   }
 
   function clampInt(v, lo, hi) { return Math.max(lo, Math.min(hi, Math.round(v))); }
@@ -270,13 +479,16 @@
   }
 
   async function disconnect() {
-    ['trainer', 'powermeter', 'hr'].forEach(function (k) {
+    ['trainer', 'powermeter', 'hr', 'csc'].forEach(function (k) {
       var c = conns[k];
+      closing[k] = true;
+      if (meta[k]) meta[k].state = 'disconnected';
       try { if (c && c.server && c.server.connected) c.device.gatt.disconnect(); } catch (e) { /* ya desconectado */ }
       conns[k] = null;
       latest[k] = {};
     });
-    cpState = null;
+    cpState = null; cscState = null; cscMode = null;
+    emitter.emit('status', status());
   }
 
   // ---------- Simulador ----------
@@ -352,12 +564,18 @@
     connectTrainer: connectTrainer,
     connectPowerMeter: connectPowerMeter,
     connectHeartRate: connectHeartRate,
+    connectSpeedCadence: connectSpeedCadence,
+    reconnect: reconnect,
+    setWheelCirc: setWheelCirc,
+    status: status,
     setErgPower: setErgPower,
     setSimulation: setSimulation,
     disconnect: disconnect,
     on: emitter.on,
     createSimulator: createSimulator,
-    _parse: { indoorBikeData: indoorBikeData, cyclingPower: cyclingPower, heartRate: heartRate },
+    _parse: { indoorBikeData: indoorBikeData, cyclingPower: cyclingPower, heartRate: heartRate, csc: csc },
+    _config: cfg,
+    _cscModeText: cscModeText,
     _translateError: translateError
   };
 })(typeof window !== 'undefined' ? (window.R = window.R || {}) : (globalThis.R = globalThis.R || {}));
