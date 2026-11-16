@@ -69,15 +69,20 @@ test('wheelOmega: v / r con r por defecto 0,34 m', () => {
   assert.equal(C.wheelOmega(-1, 0.35), 0);
 });
 
-test('chooseLod (alta): todos con modelo a < 60 m, procedural lejos, con histeresis', () => {
+test('chooseLod (alta): usuario/fantasma con modelo a < 60 m; 5 bots mas cercanos con modelo; luego proc y lite; histeresis', () => {
   const L = (d, prev, kind = 'bot', rank = 0) => C.chooseLod(d, kind, 'alta', prev, true, rank);
   assert.equal(L(10, 'proc'), 'model');
   assert.equal(L(59.9, 'proc'), 'model');
-  assert.equal(L(60, 'proc'), 'proc');
+  assert.equal(L(60, 'proc'), 'lite', 'bot a >= 45 m: lite');
   assert.equal(L(62, 'model'), 'model');
-  assert.equal(L(64.5, 'model'), 'proc');
-  assert.equal(L(500, 'model'), 'proc');
-  assert.equal(L(40, 'proc', 'bot', 5), 'model', 'en alta el orden no limita');
+  assert.equal(L(64.5, 'model'), 'lite');
+  assert.equal(L(40, 'proc', 'bot', 4), 'model');
+  assert.equal(L(40, 'proc', 'bot', 5), 'proc', 'sexto bot: procedural');
+  assert.equal(L(40, 'model', 'bot', 5), 'model', 'histeresis de orden');
+  assert.equal(L(40, 'proc', 'bot', 8), 'proc');
+  assert.equal(L(40, 'lite', 'bot', 9), 'lite');
+  assert.equal(L(20, 'proc', 'bot', 19), 'lite');
+  assert.equal(L(60, 'proc', 'user', -1), 'proc');
   assert.equal(L(40, 'proc', 'user', -1), 'model');
   assert.equal(L(40, 'proc', 'ghost', -1), 'model');
 });
@@ -95,6 +100,8 @@ test('chooseLod (media): usuario y fantasma a < 60 m; solo los 3 bots mas cercan
   assert.equal(M(10, 'bot', 0), 'model');
   assert.equal(M(29, 'bot', 2), 'model');
   assert.equal(M(10, 'bot', 3), 'proc', 'cuarto bot mas cercano');
+  assert.equal(M(10, 'bot', 6, 'lite'), 'lite', 'desde el orden 6: lite');
+  assert.equal(M(10, 'bot', 6), 'proc', 'histeresis de orden desde procedural');
   assert.equal(M(30, 'bot', 0), 'proc');
   assert.equal(M(32, 'bot', 0, 'model'), 'model', 'histeresis');
   assert.equal(M(35, 'bot', 0, 'model'), 'proc');
@@ -105,14 +112,17 @@ test('chooseLod (baja): solo usuario y fantasma usan el modelo', () => {
   assert.equal(C.chooseLod(12, 'user', 'baja', 'proc', true, -1), 'model');
   assert.equal(C.chooseLod(12, 'ghost', 'baja', 'proc', true, -1), 'model');
   assert.equal(C.chooseLod(12, 'bot', 'baja', 'proc', true, 0), 'proc');
+  assert.equal(C.chooseLod(12, 'bot', 'baja', 'lite', true, 4), 'lite');
   assert.equal(C.chooseLod(80, 'ghost', 'baja', 'proc', true, -1), 'proc');
 });
 
-test('castsShadow: alta usuario, fantasma y bots a < 25 m; media y baja solo el usuario', () => {
+test('castsShadow: alta usuario, fantasma y bots a < 12 m; media y baja solo el usuario', () => {
   assert.equal(C.castsShadow('user', 'alta', 50), true);
   assert.equal(C.castsShadow('ghost', 'alta', 50), true);
-  assert.equal(C.castsShadow('bot', 'alta', 24.9), true);
-  assert.equal(C.castsShadow('bot', 'alta', 25), false);
+  assert.equal(C.castsShadow('bot', 'alta', 11.9), true);
+  assert.equal(C.castsShadow('bot', 'alta', 12), false);
+  assert.equal(C.castsShadow('bot', 'alta', 5, 1), true);
+  assert.equal(C.castsShadow('bot', 'alta', 5, 2), false, 'solo los 2 bots mas cercanos');
   assert.equal(C.castsShadow('user', 'media', 5), true);
   assert.equal(C.castsShadow('ghost', 'media', 5), false);
   assert.equal(C.castsShadow('bot', 'media', 5), false);
@@ -157,4 +167,15 @@ test('materialRole: reconoce los materiales del modelo', () => {
   assert.equal(C.materialRole('Cabello entrecano', false), 'hair');
   assert.equal(C.materialRole('Piel', false), 'skin');
   assert.equal(C.materialRole('Aluminio', false), 'other');
+});
+
+test('chooseLod: pelotón de 20 - cuenta de niveles por calidad (presupuesto de draw calls)', () => {
+  const count = (q) => {
+    const c = { model: 0, proc: 0, lite: 0 };
+    for (let rank = 0; rank < 18; rank++) c[C.chooseLod(10 + rank, 'bot', q, 'lite', true, rank)]++;
+    return c;
+  };
+  assert.deepEqual(count('alta'), { model: 5, proc: 4, lite: 9 });
+  assert.deepEqual(count('media'), { model: 3, proc: 3, lite: 12 });
+  assert.deepEqual(count('baja'), { model: 0, proc: 4, lite: 14 });
 });

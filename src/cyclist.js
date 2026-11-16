@@ -14,9 +14,13 @@
   var LOD_HYSTERESIS_M = 4;           // m: margen para no alternar en el borde
   var MIN_SPEED_MPS = 0.3;            // m/s: por debajo, el ciclista se considera detenido (animacion en pausa)
   var CLIP_RPM = 60;
+  var ALTA_BOTS = 5;                  // calidad alta: bots con modelo (los mas cercanos a la camara); el resto, procedural o lite
+  var LITE_FROM_RANK = { alta: 9, media: 6, baja: 4 };   // desde este orden de cercania, el bot es una sola malla fusionada (1 draw call)
+  var PROC_MAX_M = 45;                // m: mas lejos que esto, todo bot es lite
   var MEDIA_BOTS = 3;                 // calidad media: bots con modelo (los mas cercanos)
   var MEDIA_BOT_M = 30;               // m: calidad media, distancia maxima de bot con modelo
-  var SHADOW_BOT_M = 25;              // m: calidad alta, bots que proyectan sombra
+  var SHADOW_BOTS = 2;                // calidad alta: solo los 2 bots mas cercanos proyectan sombra (presupuesto de draw calls)
+  var SHADOW_BOT_M = 12;              // m: calidad alta, bots que proyectan sombra
   var RELEASE_M = 100;                // m: un bot mas lejos libera su clon y su mixer                  // el clip Pedaleo_60rpm dura 1 s = una vuelta de biela
 
   // piezas que giran con la rueda (nombres del modelo; "Rueda" = nodos ya fusionados por el optimizador)
@@ -75,31 +79,39 @@
 
   /**
    * Nivel de detalle: 'model' (glTF completo) | 'proc' (ciclista procedural). Argumentos posicionales (sin objetos por cuadro).
-   * Presupuesto por calidad:
-   *   alta:  todos con modelo a < LOD_MODEL_M (60 m);
-   *   media: usuario y fantasma a < 60 m; solo los MEDIA_BOTS (3) bots mas cercanos y a < MEDIA_BOT_M (30 m);
-   *   baja:  solo usuario y fantasma (a < 60 m).
+   * Devuelve 'model' (glTF) | 'proc' (procedural animado, ~16 draw calls) | 'lite' (malla fusionada estatica, 1 draw call).
+   * Presupuesto por calidad (pelotones de hasta 20):
+   *   alta:  usuario y fantasma con modelo a < 60 m; los ALTA_BOTS (5) bots mas cercanos con modelo; hasta el orden 9, procedural; despues, lite;
+   *   media: usuario y fantasma a < 60 m; los MEDIA_BOTS (3) bots mas cercanos a < 30 m con modelo; hasta el orden 6, procedural; despues, lite;
+   *   baja:  solo usuario y fantasma con modelo; bots procedurales hasta el orden 4 y despues lite.
+   * Todo bot a mas de PROC_MAX_M (45 m) es lite.
    * botRank: posicion del bot por distancia a la camara entre los bots (0 = el mas cercano).
    * Con histeresis: quien ya usa el modelo lo conserva hasta el limite + LOD_HYSTERESIS_M.
    */
   function chooseLod(distM, kind, quality, prev, modelReady, botRank) {
-    if (!modelReady || !(distM >= 0)) return 'proc';
+    if (!(distM >= 0)) return 'proc';
     var h = prev === 'model' ? LOD_HYSTERESIS_M : 0;
-    if (kind === 'user' || kind === 'ghost') return distM < LOD_MODEL_M + h ? 'model' : 'proc';
-    if (quality === 'baja') return 'proc';
-    if (quality === 'media') return (botRank >= 0 && botRank < MEDIA_BOTS && distM < MEDIA_BOT_M + h) ? 'model' : 'proc';
-    return distM < LOD_MODEL_M + h ? 'model' : 'proc';
+    var rh = prev === 'model' ? 1 : 0;                         // histeresis de orden: no alternar cuando dos bots se cruzan
+    if (kind === 'user' || kind === 'ghost') return modelReady && distM < LOD_MODEL_M + h ? 'model' : 'proc';
+    if (!(botRank >= 0)) return modelReady && quality === 'alta' && distM < LOD_MODEL_M + h ? 'model' : 'proc';
+    if (modelReady) {
+      if (quality === 'alta' && botRank < ALTA_BOTS + rh && distM < LOD_MODEL_M + h) return 'model';
+      if (quality === 'media' && botRank < MEDIA_BOTS + rh && distM < MEDIA_BOT_M + h) return 'model';
+    }
+    var proc = prev === 'proc' ? 1 : 0;
+    if (botRank >= (LITE_FROM_RANK[quality] || LITE_FROM_RANK.media) + proc || distM > PROC_MAX_M) return 'lite';
+    return 'proc';
   }
 
   /**
-   * Proyecta sombra el modelo? alta: usuario, fantasma y bots a < SHADOW_BOT_M (25 m); media y baja: solo el usuario
+   * Proyecta sombra el modelo? alta: usuario, fantasma y los 2 bots mas cercanos (SHADOW_BOTS) y a < SHADOW_BOT_M (12 m); media y baja: solo el usuario
    * (en baja las sombras estan apagadas en la escena).
    */
-  function castsShadow(kind, quality, distM) {
+  function castsShadow(kind, quality, distM, botRank) {
     if (kind === 'user') return true;
     if (quality !== 'alta') return false;
     if (kind === 'ghost') return true;
-    return distM < SHADOW_BOT_M;
+    return distM < SHADOW_BOT_M && !(botRank >= SHADOW_BOTS);
   }
 
   /** Liberar el clon y el mixer de un bot lejano (se recrea si vuelve a acercarse). */
@@ -154,8 +166,12 @@
     riderCadence: riderCadence,
     wheelOmega: wheelOmega,
     MEDIA_BOTS: MEDIA_BOTS,
+    ALTA_BOTS: ALTA_BOTS,
+    LITE_FROM_RANK: LITE_FROM_RANK,
+    PROC_MAX_M: PROC_MAX_M,
     MEDIA_BOT_M: MEDIA_BOT_M,
     SHADOW_BOT_M: SHADOW_BOT_M,
+    SHADOW_BOTS: SHADOW_BOTS,
     RELEASE_M: RELEASE_M,
     chooseLod: chooseLod,
     castsShadow: castsShadow,
