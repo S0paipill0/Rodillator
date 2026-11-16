@@ -8,6 +8,9 @@
   var BATTERY = 0x180F, BATTERY_LEVEL = 0x2A19;
   var DEFAULT_WHEEL_MM = 2050;
   var CSC_IDLE_MS = 3000;   // sin eventos de rueda/biela durante 3 s => velocidad/cadencia 0
+  var CSC_MAX_KPH = 100;    // por encima: lectura imposible (p. ej. reinicio del contador) => se descarta
+  var CSC_MAX_RPM = 250;
+  var CSC_WATCHDOG_MS = 1000;
 
   var MSG_BLOCKED = 'El navegador bloqueó Bluetooth en esta vista. Abre Rodillator en una pestaña de Chrome o Edge.';
 
@@ -62,8 +65,12 @@
   }
 
   // CSC (0x2A5B). prevState: el `state` devuelto por la lectura anterior (o null).
-  // opts: { wheelCircMm = 2070, nowMs = Date.now() }.
-  // Devuelve { speedKph|null, cadenceRpm|null, wheelRevs, crankRevs, mode, state }.
+  // opts: { wheelCircMm = 2050, nowMs = Date.now() }.
+  // Devuelve { speedKph|null, cadenceRpm|null, wheelRevs, crankRevs, mode, state }, o null si el
+  // paquete no trae datos (flags sin rueda ni biela) o es demasiado corto: no se debe emitir.
+  // Lecturas imposibles (> 100 km/h, > 250 rpm, contador de rueda que retrocede, revs sin tiempo)
+  // se descartan: se conserva la última velocidad/cadencia y se re-siembra el contador.
+  // Un paquete sin revoluciones nuevas (dRev = 0) no reinicia el tiempo de inactividad.
   //   wheelRevs/crankRevs: contadores crudos del sensor (null si el flag no viene).
   //   mode: 'speed' (solo rueda) | 'cadence' (solo biela) | 'both'.
   // Los tiempos de evento van en 1/1024 s y se desbordan en uint16; las revoluciones de rueda en uint32.
@@ -71,8 +78,11 @@
     opts = opts || {};
     var circMm = opts.wheelCircMm > 0 ? opts.wheelCircMm : DEFAULT_WHEEL_MM;
     var nowMs = opts.nowMs != null ? opts.nowMs : Date.now();
+    if (!dv || dv.byteLength < 1) return null;
     var flags = dv.getUint8(0);
     var hasWheel = !!(flags & 0x01), hasCrank = !!(flags & 0x02);
+    if (!hasWheel && !hasCrank) return null;
+    if (dv.byteLength < 1 + (hasWheel ? 6 : 0) + (hasCrank ? 4 : 0)) return null;
     var o = 1;
     var prev = prevState || {};
     var st = {
@@ -89,14 +99,15 @@
       } else {
         var dTime = (wt - prev.wheelTime + 65536) % 65536;
         var dRev = (wheelRevs - prev.wheelRevs) >>> 0;
-        if (dTime > 0 && dRev > 0) {
-          st.speedKph = dRev * (circMm / 1000) / (dTime / 1024) * 3.6;
-          st.lastWheelMs = nowMs;
-        } else if (dRev === 0 && dTime === 0) {
+        var backwards = dRev > 0x7FFFFFFF;   // retroceso del contador (no es un desborde normal)
+        if (dRev === 0) {
+          // Sin vuelta nueva (aunque cambie el tiempo): conserva y, tras 3 s sin eventos, 0.
           if (st.lastWheelMs == null) st.lastWheelMs = nowMs;
-          if (nowMs - st.lastWheelMs > CSC_IDLE_MS) st.speedKph = 0;   // sin evento nuevo: conserva y luego 0
-        } else {
-          st.lastWheelMs = nowMs;
+          if (nowMs - st.lastWheelMs > CSC_IDLE_MS) st.speedKph = 0;
+        } else if (!backwards && dTime > 0) {
+          var kph = dRev * (circMm / 1000) / (dTime / 1024) * 3.6;
+          if (kph <= CSC_MAX_KPH) { st.speedKph = kph; st.lastWheelMs = nowMs; }
+          // si no, lectura imposible: se descarta y se re-siembra con los contadores actuales
         }
       }
       st.wheelRevs = wheelRevs; st.wheelTime = wt;
@@ -108,14 +119,12 @@
       } else {
         var cdT = (ct - prev.crankTime + 65536) % 65536;
         var cdR = (crankRevs - prev.crankRevs + 65536) % 65536;
-        if (cdT > 0 && cdR > 0) {
-          st.cadenceRpm = cdR / (cdT / 1024) * 60;
-          st.lastCrankMs = nowMs;
-        } else if (cdR === 0 && cdT === 0) {
+        if (cdR === 0) {
           if (st.lastCrankMs == null) st.lastCrankMs = nowMs;
           if (nowMs - st.lastCrankMs > CSC_IDLE_MS) st.cadenceRpm = 0;
-        } else {
-          st.lastCrankMs = nowMs;
+        } else if (cdT > 0) {
+          var rpm = cdR / (cdT / 1024) * 60;
+          if (rpm <= CSC_MAX_RPM) { st.cadenceRpm = rpm; st.lastCrankMs = nowMs; }
         }
       }
       st.crankRevs = crankRevs; st.crankTime = ct;
@@ -156,7 +165,12 @@
     if (name === 'SecurityError' || name === 'NotAllowedError' || /permissions? policy|disallowed|not allowed/i.test(msg)) {
       return new Error(MSG_BLOCKED);
     }
-    if (name === 'NotFoundError') return new Error('No se seleccionó ningún dispositivo.');
+    if (name === 'NotFoundError') {
+      // El usuario cerró el selector sin elegir: aviso suave, no un error.
+      var soft = new Error('No se seleccionó ningún dispositivo.');
+      soft.soft = true;
+      return soft;
+    }
     if (name === 'NetworkError') return new Error('No se pudo conectar con el dispositivo. Acércalo e inténtalo de nuevo.');
     if (/bluetooth/i.test(msg) && /not (supported|available)|undefined/i.test(msg)) {
       return new Error('Este navegador no es compatible con Bluetooth. Usa Chrome o Edge.');
@@ -185,11 +199,20 @@
   var wheelCircMm = null;      // fijado por setWheelCirc / opciones de connectSpeedCadence
   var cscMode = null;          // 'speed' | 'cadence' | 'both' | null
   var RETRY_DELAYS_MS = [1000, 2000, 4000];   // 3 reintentos con espera creciente
-  var cfg = { retryDelaysMs: RETRY_DELAYS_MS, setTimeout: function (f, ms) { return setTimeout(f, ms); } };
+  var cfg = {
+    retryDelaysMs: RETRY_DELAYS_MS,
+    setTimeout: function (f, ms) { return setTimeout(f, ms); },
+    clearTimeout: function (h) { clearTimeout(h); },
+    now: function () { return Date.now(); }
+  };
   var remembered = {};         // kind -> { id, name, device } (sesión)
   var meta = {};               // kind -> { name, id, state, batteryPct, retries }
   var closing = {};            // kind -> true si la desconexión fue pedida por el usuario
   var writeChain = Promise.resolve();
+  var valueHandlers = {};      // kind -> { ch, fn } listener activo de characteristicvaluechanged
+  var gen = {};                // kind -> generación; cambia al conectar/desconectar y anula reintentos pendientes
+  var retryTimers = {};        // kind -> handle del reintento pendiente
+  var watchdog = { handle: null, gen: 0 };
 
   function pick() {
     for (var i = 0; i < arguments.length; i++) if (arguments[i] != null) return arguments[i];
@@ -228,10 +251,56 @@
   function clearLatest(kind) {
     latest[kind] = {};
     if (kind === 'powermeter') cpState = null;
-    if (kind === 'csc') { cscState = null; cscMode = null; }
+    if (kind === 'csc') { cscState = null; cscMode = null; stopWatchdog(); }
+  }
+
+  function bumpGen(kind) {
+    gen[kind] = (gen[kind] || 0) + 1;
+    if (retryTimers[kind] != null) { try { cfg.clearTimeout(retryTimers[kind]); } catch (e) { /* nada */ } retryTimers[kind] = null; }
+    return gen[kind];
+  }
+
+  function detachValue(kind) {
+    var h = valueHandlers[kind];
+    if (h && h.ch && typeof h.ch.removeEventListener === 'function') {
+      try { h.ch.removeEventListener('characteristicvaluechanged', h.fn); } catch (e) { /* nada */ }
+    }
+    valueHandlers[kind] = null;
+  }
+
+  // Vigilante CSC: si el sensor deja de notificar, velocidad/cadencia no quedan congeladas.
+  function stopWatchdog() {
+    watchdog.gen++;
+    if (watchdog.handle != null) { try { cfg.clearTimeout(watchdog.handle); } catch (e) { /* nada */ } watchdog.handle = null; }
+  }
+
+  function startWatchdog() {
+    stopWatchdog();
+    var g = watchdog.gen;
+    function tick() {
+      watchdog.handle = null;
+      if (g !== watchdog.gen || !conns.csc) return;
+      cscWatchdogCheck();
+      watchdog.handle = cfg.setTimeout(tick, CSC_WATCHDOG_MS);
+    }
+    watchdog.handle = cfg.setTimeout(tick, CSC_WATCHDOG_MS);
+  }
+
+  function cscWatchdogCheck() {
+    var st = cscState;
+    if (!st) return;
+    var now = cfg.now(), changed = false;
+    if (st.speedKph > 0 && st.lastWheelMs != null && now - st.lastWheelMs > CSC_IDLE_MS) {
+      st.speedKph = 0; if (latest.csc.speedKph != null) latest.csc.speedKph = 0; changed = true;
+    }
+    if (st.cadenceRpm > 0 && st.lastCrankMs != null && now - st.lastCrankMs > CSC_IDLE_MS) {
+      st.cadenceRpm = 0; if (latest.csc.cadenceRpm != null) latest.csc.cadenceRpm = 0; changed = true;
+    }
+    if (changed) publish('csc');
   }
 
   async function readBattery(kind, server) {
+    if (kind !== 'csc' && kind !== 'hr') return;
     try {
       var bs = await server.getPrimaryService(BATTERY);
       var bc = await bs.getCharacteristic(BATTERY_LEVEL);
@@ -245,10 +314,14 @@
     var server = await device.gatt.connect();
     var service = await server.getPrimaryService(serviceUuid);
     var ch = await service.getCharacteristic(charUuid);
-    ch.addEventListener('characteristicvaluechanged', function (ev) { onValue(ev.target.value); });
+    detachValue(kind);   // nunca dos listeners sobre la misma característica tras reconectar
+    var fn = function (ev) { onValue(ev.target.value); };
+    ch.addEventListener('characteristicvaluechanged', fn);
+    valueHandlers[kind] = { ch: ch, fn: fn };
     await ch.startNotifications();
     conns[kind] = { device: device, server: server, service: service, ch: ch, spec: [serviceUuid, charUuid, onValue] };
     setMeta(kind, { name: device.name || '', id: device.id || null, state: 'connected', retries: 0 });
+    if (kind === 'csc') startWatchdog();
     readBattery(kind, server);
     return conns[kind];
   }
@@ -258,24 +331,30 @@
     if (wired) { if (wired.has(device)) return; wired.add(device); }
     device.addEventListener('gattserverdisconnected', function () {
       var spec = conns[kind] && conns[kind].spec;
+      if (conns[kind] && conns[kind].device !== device) return;   // evento de un dispositivo ya reemplazado
       conns[kind] = null;
+      detachValue(kind);
       clearLatest(kind);
       emitter.emit('disconnected', { kind: kind });
       if (closing[kind] || !spec || (kind !== 'csc' && kind !== 'hr')) { setMeta(kind, { state: 'disconnected' }); return; }
-      retryConnect(device, kind, spec, 0);
+      retryConnect(device, kind, spec, 0, bumpGen(kind));
     });
   }
 
-  function retryConnect(device, kind, spec, attempt) {
+  // g: generación vigente; si cambia (disconnect, nueva conexión, Reconectar manual) el reintento se anula.
+  function retryConnect(device, kind, spec, attempt, g) {
+    if (g !== gen[kind]) return;
     var delays = cfg.retryDelaysMs;
     if (attempt >= delays.length) { setMeta(kind, { state: 'disconnected', retries: attempt }); emitter.emit('reconnectFailed', { kind: kind }); return; }
     setMeta(kind, { state: 'reconnecting', retries: attempt + 1 });
-    cfg.setTimeout(async function () {
-      if (closing[kind] || conns[kind]) return;
+    retryTimers[kind] = cfg.setTimeout(async function () {
+      retryTimers[kind] = null;
+      if (g !== gen[kind] || closing[kind] || conns[kind]) return;
       try {
         await attach(device, kind, spec[0], spec[1], spec[2]);
+        if (g !== gen[kind]) return;
         emitter.emit('reconnected', { kind: kind });
-      } catch (e) { retryConnect(device, kind, spec, attempt + 1); }
+      } catch (e) { retryConnect(device, kind, spec, attempt + 1, g); }
     }, delays[attempt]);
   }
 
@@ -284,6 +363,7 @@
     if (!n || !n.bluetooth) throw new Error(MSG_BLOCKED);
     var device = null;
     closing[kind] = false;
+    bumpGen(kind);
     try {
       device = await n.bluetooth.requestDevice(options);
       await attach(device, kind, serviceUuid, charUuid, onValue);
@@ -298,30 +378,56 @@
     }
   }
 
-  // "Reconectar": reutiliza el dispositivo recordado en la sesión (por objeto o, si el navegador lo permite, por device.id).
-  async function reconnect(kind) {
-    var rem = remembered[kind];
-    if (!rem) throw new Error('No hay un sensor recordado en esta sesión. Conéctalo de nuevo.');
-    if (conns[kind]) return { name: rem.name, id: rem.id, kind: kind };
+  function storedId(kind) {
+    try { if (typeof sessionStorage !== 'undefined') return sessionStorage.getItem('rodillator.sensor.' + kind) || null; } catch (e) { /* sin sessionStorage */ }
+    return null;
+  }
+
+  function hasGetDevices() {
+    var n = nav();
+    return !!(n && n.bluetooth && typeof n.bluetooth.getDevices === 'function');
+  }
+
+  // ¿Se puede ofrecer "Reconectar"? Sí si hay un dispositivo en memoria de esta página, o si hay un id
+  // (de ajustes o de la sesión) y el navegador ofrece navigator.bluetooth.getDevices() para recuperarlo.
+  function canReconnect(kind, id) {
+    if (kind !== 'csc' && kind !== 'hr') return false;
+    if (remembered[kind] && remembered[kind].device) return true;
+    return !!((id || storedId(kind)) && hasGetDevices());
+  }
+
+  // "Reconectar": reutiliza el dispositivo recordado en esta página o, tras recargar, lo busca por id
+  // (argumento, p. ej. settings.sensors.lastSpeedId, o sessionStorage) con navigator.bluetooth.getDevices().
+  async function reconnect(kind, id) {
     var spec = kind === 'csc' ? [CSC, CSC_MEASUREMENT, onCscValue] : kind === 'hr' ? [HEART_RATE, HEART_RATE_MEASUREMENT, onHrValue] : null;
     if (!spec) throw new Error('Este tipo de sensor no admite reconexión rápida.');
-    var device = rem.device;
-    var n = nav();
-    if (!device && n && n.bluetooth && typeof n.bluetooth.getDevices === 'function') {
-      var list = await n.bluetooth.getDevices();
-      device = list.filter(function (d) { return d.id === rem.id; })[0];
+    var rem = remembered[kind];
+    if (conns[kind]) return { name: conns[kind].device.name || '', id: conns[kind].device.id || null, kind: kind };
+    var device = rem && rem.device;
+    var wantId = id || (rem && rem.id) || storedId(kind);
+    if (!device) {
+      if (!wantId) throw new Error('No hay un sensor recordado. Conéctalo de nuevo.');
+      if (!hasGetDevices()) throw new Error('Este navegador no permite reconectar sin elegir el sensor. Conéctalo de nuevo.');
+      var list;
+      try { list = await nav().bluetooth.getDevices(); } catch (e) { throw translateError(e); }
+      device = (list || []).filter(function (d) { return d.id === wantId; })[0];
     }
     if (!device) throw new Error('No se encontró el sensor. Conéctalo de nuevo.');
     closing[kind] = false;
+    bumpGen(kind);
+    if (kind === 'csc') { cscState = null; cscMode = null; }
     try {
       await attach(device, kind, spec[0], spec[1], spec[2]);
       wireDisconnect(device, kind);
+      rememberDevice(kind, device);
     } catch (e) {
       conns[kind] = null;
+      detachValue(kind);
+      clearLatest(kind);
       setMeta(kind, { state: 'disconnected' });
       throw translateError(e);
     }
-    return { name: rem.name, id: rem.id, kind: kind };
+    return { name: device.name || '', id: device.id || null, kind: kind };
   }
 
   // ---- Control Point FTMS: comandos serializados con espera de la indicación de respuesta ----
@@ -427,7 +533,8 @@
   function setWheelCirc(mm) { if (mm > 0) wheelCircMm = Number(mm); }
 
   function onCscValue(dv) {
-    var r = csc(dv, cscState, { wheelCircMm: currentWheelMm() });
+    var r = csc(dv, cscState, { wheelCircMm: currentWheelMm(), nowMs: cfg.now() });
+    if (!r) return;   // paquete vacío o corto: no se emite
     cscState = r.state;
     var first = cscMode !== r.mode;
     cscMode = r.mode;
@@ -482,12 +589,15 @@
     ['trainer', 'powermeter', 'hr', 'csc'].forEach(function (k) {
       var c = conns[k];
       closing[k] = true;
+      bumpGen(k);
+      detachValue(k);
       if (meta[k]) meta[k].state = 'disconnected';
       try { if (c && c.server && c.server.connected) c.device.gatt.disconnect(); } catch (e) { /* ya desconectado */ }
       conns[k] = null;
       latest[k] = {};
     });
     cpState = null; cscState = null; cscMode = null;
+    stopWatchdog();
     emitter.emit('status', status());
   }
 
@@ -566,6 +676,7 @@
     connectHeartRate: connectHeartRate,
     connectSpeedCadence: connectSpeedCadence,
     reconnect: reconnect,
+    canReconnect: canReconnect,
     setWheelCirc: setWheelCirc,
     status: status,
     setErgPower: setErgPower,

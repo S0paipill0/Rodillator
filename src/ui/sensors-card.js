@@ -2,7 +2,7 @@
   'use strict';
 
   var MSG_NO_BT = 'Tu navegador o esta vista no permite Bluetooth. Abre la versión web de Rodillator en Chrome (Android o computador).';
-  var MSG_WATCH = 'Para el pulso en vivo usa una banda de pecho Bluetooth (estándar Heart Rate, servicio 0x180D), por ejemplo la de Decathlon. El Xiaomi Watch S3 no transmite el pulso en vivo; el pulso del reloj podrá importarse después desde Strava.';
+  var MSG_WATCH = 'Para el pulso en vivo usa una banda de pecho Bluetooth (estándar Heart Rate, servicio 0x180D), por ejemplo la de Decathlon. Según lo comprobado, el Xiaomi Watch S3 no transmite el pulso en vivo por Bluetooth. Próximamente: importar el pulso del reloj desde Strava.';
   var STATE_TEXT = { connected: 'Conectado', reconnecting: 'Reconectando…', disconnected: 'Sin conectar' };
 
   function fallbackEl(tag, attrs, children) {
@@ -25,14 +25,21 @@
 
   // Dibuja la tarjeta "Sensores y rodillo" dentro de containerEl.
   // ctx: { store } con get() y set(patch); si falta usa R.store.
+  // Ciclo de vida: llamar destroy() al quitar la tarjeta. Además, si containerEl estuvo en el
+  // documento y deja de estarlo (isConnected false), la tarjeta se desuscribe sola en el próximo evento.
   function sensorsCard(containerEl, ctx) {
     var el = (R.ui && typeof R.ui.el === 'function') ? R.ui.el : fallbackEl;
     var store = (ctx && ctx.store) || R.store;
     var SS = R.sensorsSettings;
     var dev = R.devices;
     var errorMsg = '';
+    var noteMsg = '';         // aviso suave (p. ej. selector cancelado)
     var btAvailable = null;   // null = comprobando
     var unsubs = [];
+    var destroyed = false;
+    var wasConnected = false;
+    // "Personalizado" elegido explícitamente: se mantiene aunque los mm coincidan con un preset.
+    var customMode = SS.presetFor(SS.normalize((store.get() || {}).settings).trainer.wheelCircMm) === 'custom';
 
     function settings() { return SS.normalize((store.get() || {}).settings); }
     function saveTrainer(patch) {
@@ -53,15 +60,19 @@
       return null;
     }
 
+    function fail(e, fallback) {
+      if (e && e.soft) noteMsg = e.message; else errorMsg = (e && e.message) || fallback;
+      draw();
+    }
     function connect(kind) {
-      errorMsg = '';
+      errorMsg = ''; noteMsg = '';
       var p = kind === 'csc' ? dev.connectSpeedCadence({ wheelCircMm: settings().trainer.wheelCircMm }) : dev.connectHeartRate();
       p.then(function (info) { saveSensors(kind === 'csc' ? { lastSpeedId: info.id } : { lastHrId: info.id }); draw(); },
-        function (e) { errorMsg = (e && e.message) || 'No se pudo conectar.'; draw(); });
+        function (e) { fail(e, 'No se pudo conectar.'); });
     }
-    function reconnect(kind) {
-      errorMsg = '';
-      dev.reconnect(kind).then(draw, function (e) { errorMsg = (e && e.message) || 'No se pudo reconectar.'; draw(); });
+    function reconnect(kind, id) {
+      errorMsg = ''; noteMsg = '';
+      dev.reconnect(kind, id).then(function () { draw(); }, function (e) { fail(e, 'No se pudo reconectar.'); });
     }
 
     function sensorRow(kind, title, connectLabel) {
@@ -76,18 +87,26 @@
         el('strong', null, title),
         el('span', { 'class': 'sn-state', role: 'status' }, bits.join(' · ')),
         el('button', { type: 'button', 'class': 'btn', disabled: btAvailable === false || state === 'connected' || state === 'reconnecting', onclick: function () { connect(kind); } }, connectLabel),
-        (state === 'disconnected' && (rem || (st && st.id))) ? el('button', { type: 'button', 'class': 'btn', disabled: btAvailable === false, onclick: function () { reconnect(kind); } }, 'Reconectar') : null
+        (state === 'disconnected' && dev && dev.canReconnect && dev.canReconnect(kind, rem || (st && st.id) || null))
+          ? el('button', { type: 'button', 'class': 'btn', disabled: btAvailable === false, onclick: function () { reconnect(kind, rem || (st && st.id) || null); } }, 'Reconectar')
+          : null
       ]);
     }
 
     function draw() {
+      if (destroyed) return;
       var s = settings();
       var t = s.trainer;
-      var preset = SS.presetFor(t.wheelCircMm);
+      if (SS.presetFor(t.wheelCircMm) === 'custom') customMode = true;
+      var preset = customMode ? 'custom' : SS.presetFor(t.wheelCircMm);
       var presetSel = el('select', { id: 'sn-preset', 'aria-label': 'Medida de la rueda', onchange: function (ev) {
         var id = ev.target.value;
-        if (id !== 'custom') { var p = SS.WHEEL_PRESETS.filter(function (x) { return x.id === id; })[0]; if (p) saveTrainer({ wheelCircMm: p.mm }); }
-        else customRow.hidden = false;
+        if (id === 'custom') customMode = true;
+        else {
+          customMode = false;
+          var p = SS.WHEEL_PRESETS.filter(function (x) { return x.id === id; })[0];
+          if (p) saveTrainer({ wheelCircMm: p.mm });
+        }
         draw();
       } }, SS.WHEEL_PRESETS.map(function (p) {
         return el('option', { value: p.id, selected: preset === p.id }, p.label + ' (' + p.mm + ' mm)');
@@ -108,6 +127,7 @@
         el('p', { 'class': 'card-sub' }, 'Conecta tu sensor de velocidad/cadencia y tu pulso por Bluetooth.'),
         btAvailable === false ? el('p', { 'class': 'sn-warn', role: 'alert' }, MSG_NO_BT) : null,
         errorMsg ? el('p', { 'class': 'sn-warn', role: 'alert' }, errorMsg) : null,
+        noteMsg ? el('p', { 'class': 'sn-note' }, noteMsg) : null,
         sensorRow('csc', 'Velocidad / cadencia', 'Conectar velocidad/cadencia'),
         sensorRow('hr', 'Pulso', 'Conectar pulso'),
         el('p', { 'class': 'card-sub' }, MSG_WATCH),
@@ -120,16 +140,29 @@
       ]);
       containerEl.textContent = '';
       containerEl.appendChild(card);
+      if (containerEl.isConnected) wasConnected = true;
+    }
+
+    function destroy() {
+      destroyed = true;
+      unsubs.splice(0).forEach(function (u) { try { u(); } catch (e) { /* nada */ } });
+    }
+
+    // Redibujo por evento de R.devices: si el contenedor ya salió del documento, se desuscribe.
+    function onDeviceEvent() {
+      if (destroyed) return;
+      if (wasConnected && containerEl.isConnected === false) { destroy(); return; }
+      draw();
     }
 
     draw();
     if (dev && dev.isBluetoothAvailable) {
-      Promise.resolve(dev.isBluetoothAvailable()).then(function (ok) { btAvailable = !!ok; draw(); }, function () { btAvailable = false; draw(); });
+      Promise.resolve(dev.isBluetoothAvailable()).then(function (ok) { btAvailable = !!ok; onDeviceEvent(); }, function () { btAvailable = false; onDeviceEvent(); });
     }
     if (dev && dev.on) {
-      ['status', 'cscMode', 'disconnected', 'reconnected', 'reconnectFailed'].forEach(function (ev) { unsubs.push(dev.on(ev, draw)); });
+      ['status', 'cscMode', 'disconnected', 'reconnected', 'reconnectFailed'].forEach(function (ev) { unsubs.push(dev.on(ev, onDeviceEvent)); });
     }
-    return { destroy: function () { unsubs.splice(0).forEach(function (u) { u(); }); }, redraw: draw };
+    return { destroy: destroy, redraw: draw };
   }
 
   R.ui = R.ui || {};
