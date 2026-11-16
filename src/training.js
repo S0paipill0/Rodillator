@@ -862,6 +862,87 @@
     return { items: items, reps: [n, groups.length], scaled: scaled };
   }
 
+
+  // ======================================================================
+  // Pausas de hidratación
+  // ======================================================================
+  const HYD_INTENSE_PCT = 88;   // desde sweet spot hacia arriba un paso es "intenso" y no se corta
+  const HYD_MIN_START_S = 8 * 60; // no insertar en los primeros 8 min
+  const HYD_MIN_END_S = 5 * 60;   // ni en los últimos 5 min (del entrenamiento original)
+  const HYD_SHORT_SOFT_S = 180;  // recuperación "corta" de una serie on/off (< 3 min)
+  const HYD_MIN_FRAGMENT_S = 30;  // al partir un paso suave, cada trozo dura al menos esto
+  const stepIntensity = (s) => Math.max(s.powerPct, s.powerPctEnd != null ? s.powerPctEnd : s.powerPct);
+
+  // Devuelve una copia del entrenamiento con pausas { durationS, powerPct: 50, label: 'Hidratación', hydrate: true }
+  // cada ~everyMin min de trabajo. Las pausas van entre pasos o dentro de un paso suave (que se parte en
+  // dos); nunca dentro de un paso intenso (>= 88 % FTP; incluye todo paso >= 106 % y los intensos < 3 min).
+  // Si el momento toca dentro de un bloque intenso continuo, la pausa va justo después del bloque.
+  // Los tiempos se miden en el entrenamiento original (sin contar las pausas). Los tests se devuelven sin pausas.
+  function withHydration(workout, opts) {
+    opts = opts || {};
+    const everyMin = isFinite(opts.everyMin) && opts.everyMin > 0 ? clamp(opts.everyMin, 5, 60) : 12;
+    const pauseS = Math.round(isFinite(opts.durationS) && opts.durationS > 0 ? clamp(opts.durationS, 15, 120) : 45);
+    const everyS = everyMin * 60;
+    const src = workout.steps.map((s) => Object.assign({}, s));
+    // idempotente: si ya trae pausas de hidratación no se agregan otras
+    if (src.some((s) => s.hydrate)) {
+      const n = src.filter((s) => s.hydrate).length;
+      return Object.assign({}, workout, { steps: src, hydration: workout.hydration || { everyMin: everyMin, durationS: pauseS, count: n } });
+    }
+    const T = sumDur(src);
+    const pause = () => ({ durationS: pauseS, powerPct: 50, label: 'Hidratación', hydrate: true });
+    const out = [];
+    let count = 0;
+    if (workout.category !== 'test') {
+      let due = Math.max(everyS, HYD_MIN_START_S), pending = false, done = false, t = 0;
+      const valid = (p) => p >= HYD_MIN_START_S && p <= T - HYD_MIN_END_S;
+      const insertAt = (p) => { out.push(pause()); count++; due = p + everyS; pending = false; };
+      src.forEach((step, idx) => {
+        const a = t, b = t + step.durationS;
+        t = b;
+        if (done) { out.push(step); return; }
+        const soft = stepIntensity(step) < HYD_INTENSE_PCT;
+        if (pending || due <= a) {
+          const nxt = src[idx + 1];
+          if (soft && step.durationS < HYD_SHORT_SOFT_S && nxt && stepIntensity(nxt) >= HYD_INTENSE_PCT && valid(b)) {
+            // series on/off cortas: la pausa va tras la recuperación corta, no justo después del esfuerzo
+            out.push(step); insertAt(b); return;
+          }
+          if (soft) {
+            if (a > T - HYD_MIN_END_S) done = true; else if (valid(a)) insertAt(a); else pending = true;
+          } else pending = true;
+        }
+        if (!soft) { if (!done && due < b) pending = true; out.push(step); return; }
+        // paso suave: puede partirse en el instante `due`
+        let cur = step, ca = a;
+        while (!done && due > ca && due < b) {
+          if (due > T - HYD_MIN_END_S) { done = true; break; }
+          const first = due - ca, second = b - due;
+          if (first >= HYD_MIN_FRAGMENT_S && second >= HYD_MIN_FRAGMENT_S && valid(due)) {
+            const p0 = cur.powerPct, p1 = cur.powerPctEnd != null ? cur.powerPctEnd : cur.powerPct;
+            const mid = p0 + (p1 - p0) * (first / cur.durationS);
+            const head = Object.assign({}, cur, { durationS: Math.round(first) });
+            const tail = Object.assign({}, cur, { durationS: cur.durationS - head.durationS });
+            if (cur.powerPctEnd != null) { head.powerPctEnd = mid; tail.powerPct = mid; }
+            const p = due; out.push(head); insertAt(p); cur = tail; ca = p;
+          } else if (first < HYD_MIN_FRAGMENT_S && valid(ca)) {
+            insertAt(ca);
+          } else if (second < HYD_MIN_FRAGMENT_S && valid(b)) {
+            break; // la pausa va al inicio del siguiente paso (due <= b)
+          } else { break; }
+        }
+        out.push(cur);
+      });
+    } else {
+      src.forEach((s) => out.push(s));
+    }
+    const w = Object.assign({}, workout, { steps: out });
+    w.durationS = sumDur(out);
+    w.tss = r1(out.reduce((acc, s) => acc + stepTss(s), 0));
+    w.hydration = { everyMin: everyMin, durationS: pauseS, count: count };
+    return w;
+  }
+
   function timedWorkout(o) {
     o = o || {};
     const min = o.durationMin;
@@ -1113,6 +1194,7 @@
     motivationPhrases: motivationPhrases,
     targetPowerAt: targetPowerAt,
     timedWorkout: timedWorkout,
+    withHydration: withHydration,
     registerWorkout: registerWorkout,
     compactWorkout: compactWorkout,
     TIMED_FOCUS: TIMED_FOCUS,

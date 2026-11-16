@@ -9,7 +9,7 @@ const { spawnSync } = require('node:child_process');
 const ROOT = path.join(__dirname, '..');
 const THREE = 'https://cdn.jsdelivr.net/npm/three@0.149.0/build/three.min.js';
 const CHART = 'https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js';
-const ORDER = ['store', 'training', 'physics', 'routes', 'riders', 'vendor/gltfloader', 'cyclist', 'scene3d', 'devices', 'integrations', 'voicepack', 'coach',
+const ORDER = ['store', 'training', 'physics', 'trainer', 'routes', 'riders', 'vendor/gltfloader', 'cyclist', 'scene3d', 'devices', 'integrations', 'voicepack', 'coach',
   'ui/shell', 'ui/onboarding', 'ui/plan', 'ui/routes', 'ui/settings', 'ui/ride', 'ui/stats', 'app'];
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'rodillator-build-'));
