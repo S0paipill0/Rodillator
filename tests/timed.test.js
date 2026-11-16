@@ -42,17 +42,19 @@ test('duración exacta para todos los enfoques y tiempos', () => {
 test('calentamiento (15 %, 5-15 min) y enfriamiento (10 %, mín. 3 min)', () => {
   ['tempo', 'sweetspot', 'umbral', 'vo2', 'sprints', 'resistencia'].forEach((focus) => DURS.forEach((m) => {
     const w = T.timedWorkout({ durationMin: m, focus, today: TODAY });
-    const warm = w.steps[0], cool = w.steps[w.steps.length - 1];
-    assert.ok(warm.durationS >= 300 && warm.durationS <= 900, 'calentamiento ' + focus + m);
+    const cool = w.steps[w.steps.length - 1];
+    const warmTotal = w.steps.filter((s, i) => i === 0 || /Activación|^Suave$/.test(s.label) && i < 6).reduce((a, s) => a + s.durationS, 0);
+    assert.ok(w.steps[0].durationS >= 300 && w.steps[0].durationS <= 900, 'calentamiento ' + focus + m);
+    assert.ok(warmTotal >= 300 && warmTotal <= 900, 'calentamiento total ' + focus + m);
     assert.ok(cool.durationS >= 180, 'enfriamiento ' + focus + m);
-    if (m === 60) { assert.equal(warm.durationS, 540); assert.equal(cool.durationS, 360); }
+    if (m === 60) { assert.equal(warmTotal, 540); assert.equal(cool.durationS, 360); }
   }));
 });
 
 test('VO2: en 30 min son 4×2 min y en 60 min 5×4 min, misma intensidad', () => {
   const w30 = T.timedWorkout({ durationMin: 30, focus: 'vo2', today: TODAY });
   const w60 = T.timedWorkout({ durationMin: 60, focus: 'vo2', today: TODAY });
-  const work = (w) => w.steps.filter((s) => s.powerPct >= 110);
+  const work = (w) => w.steps.filter((s) => s.powerPct >= 110 && !/Activación/.test(s.label));
   assert.equal(work(w30).length, 4);
   assert.ok(work(w30).every((s) => s.durationS === 120));
   assert.equal(work(w60).length, 5);
@@ -230,4 +232,65 @@ test('store: settings.lastTimed se normaliza', () => {
   assert.deepEqual(S.get().settings.lastTimed, { durationMin: 150, focus: 'auto' });
   S.set({ settings: { lastTimed: { durationMin: 30, focus: 'hoy' } } });
   assert.deepEqual(S.get().settings.lastTimed, { durationMin: 30, focus: 'hoy' });
+});
+
+const doneActs = (tss) => [act(TODAY, { tss: tss, workoutId: 'umbral-2x20' })];
+const planDone = () => { const p = planWith('umbral-2x20'); p.weeks[0].days[0].status = 'hecho'; return p; };
+
+test('sesión de hoy ya hecha: auto la trata como descanso y avisa', () => {
+  const w = T.timedWorkout({ durationMin: 45, focus: 'auto', plan: planDone(), activities: doneActs(80), today: TODAY });
+  assert.ok(['resistencia', 'recuperacion'].includes(w.category));
+  assert.match(w.notice, /Ya completaste la sesión de hoy/);
+  assert.match(w.description, /Ya completaste/);
+  // solo con el estado del plan (sin actividad) también cuenta
+  const w2 = T.timedWorkout({ durationMin: 45, focus: 'auto', plan: planDone(), today: TODAY });
+  assert.match(w2.notice, /Ya completaste/);
+  // el TSS de hoy suma a la fatiga: con mucha carga previa baja a recuperación
+  const acts = [];
+  for (let i = 1; i <= 14; i++) acts.push(act('2026-11-' + String(16 - i).padStart(2, '0'), { tss: 150 }));
+  const tired = T.timedWorkout({ durationMin: 45, focus: 'auto', plan: planDone(), activities: acts.concat(doneActs(300)), today: TODAY });
+  assert.equal(tired.category, 'recuperacion');
+  // 'hoy' ya hecha tampoco repite la sesión
+  const h = T.timedWorkout({ durationMin: 30, focus: 'hoy', plan: planDone(), activities: doneActs(80), today: TODAY });
+  assert.ok(['resistencia', 'recuperacion'].includes(h.category));
+  assert.match(h.notice, /Ya completaste/);
+});
+
+test('enfoque explícito con fatiga alta: se respeta con advertencia no bloqueante', () => {
+  const acts = [];
+  for (let i = 1; i <= 14; i++) acts.push(act('2026-11-' + String(16 - i).padStart(2, '0'), { tss: 200 }));
+  const w = T.timedWorkout({ durationMin: 45, focus: 'vo2', activities: acts, today: TODAY });
+  assert.equal(w.category, 'vo2');
+  assert.match(w.notice, /Tu fatiga es alta; considera Recuperación/);
+  const hard = T.timedWorkout({ durationMin: 45, focus: 'umbral', activities: [act('2026-11-15', { rpe: 9, tss: 50 })], today: TODAY });
+  assert.equal(hard.category, 'umbral');
+  assert.match(hard.notice, /fatiga es alta/);
+  assert.equal(T.timedWorkout({ durationMin: 45, focus: 'recuperacion', activities: acts, today: TODAY }).notice, null);
+  assert.equal(T.timedWorkout({ durationMin: 45, focus: 'vo2', today: TODAY }).notice, null);
+});
+
+test('recuperación: bloque tope de 60 min y aviso si el tiempo es mayor', () => {
+  const w = T.timedWorkout({ durationMin: 150, focus: 'recuperacion', today: TODAY });
+  assert.equal(sum(w), 9000);
+  assert.match(w.notice, /puedes terminar antes/);
+  assert.ok(w.steps.some((s) => /Opcional/.test(s.label)));
+  const main = w.steps.filter((s) => !/Opcional|Calentamiento|Vuelta/.test(s.label)).reduce((a, s) => a + s.durationS, 0);
+  assert.equal(main, 3600);
+  assert.equal(T.timedWorkout({ durationMin: 60, focus: 'recuperacion', today: TODAY }).notice, null);
+});
+
+test('activadores en el calentamiento de vo2/umbral/sprints con >= 8 min; descripción del relleno', () => {
+  ['vo2', 'umbral', 'sprints'].forEach((f) => {
+    const w = T.timedWorkout({ durationMin: 60, focus: f, today: TODAY });
+    const a = w.steps.filter((s) => /Activación/.test(s.label));
+    assert.equal(a.length, 2, f);
+    assert.ok(a.every((s) => s.durationS === 20 && s.powerPct >= 110 && s.powerPct <= 120));
+    assert.ok(w.steps.indexOf(a[0]) < 6);
+    const short = T.timedWorkout({ durationMin: 30, focus: f, today: TODAY });
+    assert.equal(short.steps.filter((s) => /Activación/.test(s.label)).length, 0);
+  });
+  assert.equal(T.timedWorkout({ durationMin: 60, focus: 'tempo', today: TODAY }).steps.filter((s) => /Activación/.test(s.label)).length, 0);
+  const long = T.timedWorkout({ durationMin: 150, focus: 'sprints', today: TODAY });
+  assert.ok(long.steps.some((s) => s.label === 'Rodaje aeróbico suave'));
+  assert.match(long.description, /rodaje aeróbico/i);
 });

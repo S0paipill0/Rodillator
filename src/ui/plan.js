@@ -162,7 +162,7 @@
           el('div', { 'class': 'day-date' }, [el('span', null, dateLabel), isToday ? el('span', { 'class': 'status', style: { color: 'var(--gold)' } }, 'Hoy') : status ? el('span', { 'class': 'status status-' + status }, status === 'hecho' ? 'Hecha' : 'Saltada') : null]),
           el('div', { 'class': 'day-name' }, w.name),
           el('div', { 'class': 'day-meta' }, U.fmtDur(w.durationS) + ' · ' + Math.round(w.tss) + ' TSS'),
-          status === 'hecho' && day.note ? el('div', { 'class': 'day-note' }, day.note.charAt(0).toUpperCase() + day.note.slice(1)) : null,
+          status === 'hecho' && typeof day.note === 'string' && day.note ? el('div', { 'class': 'day-note' }, day.note.charAt(0).toUpperCase() + day.note.slice(1)) : null,
           U.workoutProfile(w)
         ]);
       }

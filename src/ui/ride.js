@@ -496,6 +496,14 @@
         try { store.set({ settings: { lastTimed: { durationMin: cfg.timed.durationMin, focus: cfg.timed.focus } } }); } catch (e) { /* sin guardar */ }
       }
     }
+    // Sesión de hoy aún por hacer (si ya está hecha, "Versión corta de hoy" no aplica)
+    function openTodaySession() {
+      const st = store.get(), ymd = L.ymd();
+      const t = L.pickTodayWorkout(st.plan, ymd);
+      if (!t || t.status === 'hecho') return null;
+      if ((st.activities || []).some((a) => L.ymd(new Date(a.date)) === ymd)) return null;
+      return t;
+    }
     const isTimedMode = () => cfg.tab === 'free' && cfg.freeMode === 'tiempo';
 
     function timedCard(todaySession, tw) {
@@ -503,19 +511,19 @@
       const isOther = cfg.timedOther || TIMED_DURS.indexOf(cfg.timed.durationMin) < 0;
       const durRow = h('div', { class: 'rd-chips', role: 'group', 'aria-label': 'Tiempo disponible' }, TIMED_DURS.map((m) => chip(m + ' min', !isOther && cfg.timed.durationMin === m, () => {
         cfg.timed.durationMin = m; cfg.timedOther = false; saveTimed(); renderPrep();
-      })).concat([chip('Otro', isOther, () => { cfg.timedOther = true; renderPrep(); })]));
+      }, { 'data-key': 'dur-' + m })).concat([chip('Otro', isOther, () => { cfg.timedOther = true; renderPrep(); }, { 'data-key': 'dur-otro' })]));
       const kids = [h('h2', { class: 'rd-h', text: '¿Cuánto tiempo tienes?' }), durRow];
       if (isOther) {
         kids.push(h('label', { class: 'rd-lbl', for: 'rd-tmin', text: 'Minutos (15 a 150)' }));
         kids.push(h('input', {
-          id: 'rd-tmin', class: 'rd-input rd-input--short', type: 'number', inputmode: 'numeric', min: '15', max: '150', step: '1', value: String(cfg.timed.durationMin),
+          id: 'rd-tmin', 'data-key': 'tmin', class: 'rd-input rd-input--short', type: 'number', inputmode: 'numeric', min: '15', max: '150', step: '1', value: String(cfg.timed.durationMin),
           onchange: (e) => { cfg.timed.durationMin = Math.round(Number(e.target.value) || 0); saveTimed(); renderPrep(); },
         }));
       }
       kids.push(h('h2', { class: 'rd-h rd-h--sub', text: 'Enfoque' }));
       kids.push(h('div', { class: 'rd-chips', role: 'group', 'aria-label': 'Enfoque de la sesión' }, TIMED_FOCUS_OPTS
         .filter((o) => o[0] !== 'hoy' || todaySession)
-        .map((o) => chip(o[1], cfg.timed.focus === o[0], () => { cfg.timed.focus = o[0]; saveTimed(); renderPrep(); }))));
+        .map((o) => chip(o[1], cfg.timed.focus === o[0], () => { cfg.timed.focus = o[0]; saveTimed(); renderPrep(); }, { 'data-key': 'foc-' + o[0] }))));
       return h('section', { class: 'rd-card rd-timed' }, kids);
     }
 
@@ -547,16 +555,18 @@
     }
 
     function renderPrep() {
+      const ae = document.activeElement;
+      const focusKey = ae && ae !== document.body && root.contains(ae) ? ae.getAttribute('data-key') : null;
       root.className = 'rd rd--prep';
       root.textContent = '';
       const tabs = [
-        { id: 'workout', label: 'Entrenamiento de hoy' },
+        { id: 'workout', label: 'Hoy', aria: 'Entrenamiento de hoy' },
         { id: 'route', label: 'Rutas' },
         { id: 'free', label: 'Libre' },
       ];
       const tablist = h('div', { class: 'rd-tabs', role: 'tablist', 'aria-label': 'Tipo de rodada' }, tabs.map((t) => h('button', {
-        type: 'button', role: 'tab', class: 'rd-tab' + (cfg.tab === t.id ? ' is-on' : ''), 'aria-selected': cfg.tab === t.id ? 'true' : 'false',
-        text: t.label, onclick: () => { cfg.tab = t.id; renderPrep(); },
+        type: 'button', role: 'tab', 'data-key': 'tab-' + t.id, class: 'rd-tab' + (cfg.tab === t.id ? ' is-on' : ''), 'aria-selected': cfg.tab === t.id ? 'true' : 'false',
+        text: t.label, 'aria-label': t.aria || null, onclick: () => { cfg.tab = t.id; renderPrep(); },
       })));
 
       const main = h('div', { class: 'rd-prep-col' });
@@ -565,11 +575,11 @@
       if (cfg.tab === 'free') {
         const modes = [{ id: 'tiempo', label: 'Por tiempo' }, { id: 'libre', label: 'Rodada libre' }];
         main.appendChild(h('div', { class: 'rd-tabs rd-seg', role: 'group', 'aria-label': 'Modo de la pestaña Libre' }, modes.map((m) => h('button', {
-          type: 'button', class: 'rd-tab' + (cfg.freeMode === m.id ? ' is-on' : ''), 'aria-pressed': cfg.freeMode === m.id ? 'true' : 'false',
+          type: 'button', 'data-key': 'seg-' + m.id, class: 'rd-tab' + (cfg.freeMode === m.id ? ' is-on' : ''), 'aria-pressed': cfg.freeMode === m.id ? 'true' : 'false',
           text: m.label, onclick: () => { cfg.freeMode = m.id; renderPrep(); },
         }))));
         if (cfg.freeMode === 'tiempo') {
-          const todaySession = L.pickTodayWorkout(state0.plan, L.ymd());
+          const todaySession = openTodaySession();
           if (cfg.timed.focus === 'hoy' && !todaySession) cfg.timed.focus = 'auto';
           tw = genTimed();
           main.appendChild(timedCard(todaySession, tw));
@@ -663,6 +673,10 @@
       root.appendChild(h('div', { class: 'rd-startbar' }, [
         start, !cfg.routeId ? h('span', { class: 'rd-note', text: 'No hay rutas para rodar.' }) : null,
       ]));
+      if (focusKey) { // el foco vuelve al control equivalente tras redibujar
+        const again = root.querySelector('[data-key="' + focusKey + '"]');
+        if (again) try { again.focus({ preventScroll: true }); } catch (e) { again.focus(); }
+      }
     }
 
     // ======================================================================

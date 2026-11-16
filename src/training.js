@@ -729,14 +729,33 @@
     return steps;
   }
 
+  // Calentamiento; en sesiones intensas con >= 8 min incluye 2 activaciones de 20 s al ~115 % al final.
+  function warmSteps(cat, warmMin, endPct) {
+    if ((cat === 'vo2' || cat === 'umbral' || cat === 'anaerobico') && warmMin >= 8) {
+      return [st(warmMin * 60 - 120, 45, 'Calentamiento progresivo', { end: endPct }),
+        st(20, 115, 'Activación 1/2', { cadence: 110 }), st(40, 50, 'Suave'), st(20, 115, 'Activación 2/2', { cadence: 110 }), st(40, 50, 'Suave')];
+    }
+    return [warm(warmMin, 45, endPct)];
+  }
+  // Frase sobre los pasos "de relleno" y las activaciones, para la descripción
+  function fillerText(steps, min) {
+    let t = '';
+    if (steps.some((x) => /^Activación/.test(x.label))) t += ' El calentamiento termina con dos activaciones de 20 s.';
+    const f = steps.filter((x) => x.label === 'Rodaje aeróbico suave')[0];
+    if (f) t += ' Para completar los ' + min + ' min se agrega un rodaje aeróbico suave de ' + fmtSpan(f.durationS) + ' tras los intervalos.';
+    return t;
+  }
+
   function freshItems(cat, M) {
     const work = (steps) => ({ steps: [].concat(steps), rec: false });
     const rest = (step) => ({ steps: [step], rec: true });
     if (cat === 'resistencia') return { items: [work(st(M, M >= 2400 ? 68 : 65, 'Ritmo aeróbico estable', { cadence: 90 }))], plan: { kind: 'steady' } };
     if (cat === 'recuperacion') {
-      const n = Math.floor(M / 600), out = [];
+      const Mw = Math.min(M, 3600); // tope de 60 min de bloque: más tiempo no mejora una recuperación
+      const n = Math.floor(Mw / 600), out = [];
       for (let i = 0; i < n; i++) out.push(st(540, 50, 'Pedaleo suave'), st(60, 55, 'Giros rápidos', { cadence: 100 }));
-      if (M - n * 600 > 0) out.push(st(M - n * 600, 50, 'Pedaleo suave y fluido', { cadence: 90 }));
+      if (Mw - n * 600 > 0) out.push(st(Mw - n * 600, 50, 'Pedaleo suave y fluido', { cadence: 90 }));
+      if (M > Mw) out.push(st(M - Mw, 50, 'Opcional: puedes terminar antes', { cadence: 90 }));
       return { items: [work(out)], plan: { kind: 'steady' } };
     }
     let n, w, r, pct, rpct, name, ex;
@@ -858,39 +877,51 @@
     const tsb = (pmc(acts, { days: 120, today: today }).pop() || { tsb: 0 }).tsb;
     const yesterday = addDays(today, -1);
     const hardYesterday = acts.some((a) => localDate(a.date) === yesterday && a.rpe != null && a.rpe >= 9);
-    const tired = tsb < -25;
 
     // sesión de hoy y fase del plan
-    let todayW = null, phase = null;
+    let todayW = null, phase = null, todayStatus = null;
     const upcoming = [];
     if (o.plan && o.plan.weeks) {
       o.plan.weeks.forEach((wk) => wk.days.forEach((d) => {
-        if (d.date === today) { phase = wk.phase; if (d.workoutId) todayW = getWorkout(d.workoutId); }
+        if (d.date === today) { phase = wk.phase; if (d.workoutId) { todayW = getWorkout(d.workoutId); todayStatus = d.status; } }
         else if (d.date > today && d.date <= addDays(today, 7) && d.workoutId && d.status === 'pendiente') upcoming.push(getWorkout(d.workoutId));
       }));
     }
 
+    // la sesión de hoy ya hecha: hoy cuenta como día de descanso y su TSS suma a la fatiga
+    const actsToday = acts.filter((a) => localDate(a.date) === today);
+    const tssToday = actsToday.reduce((a, x) => a + (Number(x.tss) || 0), 0);
+    const doneToday = !!todayW && (todayStatus === 'hecho' || actsToday.length > 0);
+    const tsbEff = tsb - tssToday * (1 / 7 - 1 / 42);
+    const tiredNow = tsbEff < -25;
     const soften = (cat) => {
-      if (tired) return cat === 'recuperacion' ? cat : 'recuperacion';
+      if (tiredNow) return cat === 'recuperacion' ? cat : 'recuperacion';
       if (hardYesterday) return cat === 'recuperacion' || cat === 'resistencia' ? cat : 'resistencia';
       return cat;
     };
-    const fatigueNotice = tired
-      ? 'Tu fatiga acumulada es alta (TSB ' + Math.round(tsb) + '), así que hoy priorizamos recuperar con un rodaje suave.'
+    const fatigueNotice = tiredNow
+      ? 'Tu fatiga acumulada es alta (TSB ' + Math.round(tsbEff) + '), así que hoy priorizamos recuperar con un rodaje suave.'
       : 'Ayer reportaste un esfuerzo percibido (RPE) de 9 o más, así que hoy bajamos la intensidad a un rodaje aeróbico.';
 
     let cat, notice = null, lead = '';
     let baseCat = null, base = null;
-    if (FOCUS_CAT[focus]) cat = FOCUS_CAT[focus];
-    else {
+    const doneNotice = 'Ya completaste la sesión de hoy: te proponemos un rodaje suave para sumar sin acumular fatiga.';
+    if (FOCUS_CAT[focus]) {
+      cat = FOCUS_CAT[focus];
+      // enfoque explícito: se respeta, con advertencia no bloqueante si la fatiga es alta
+      if (tiredNow && cat !== 'recuperacion') notice = 'Tu fatiga es alta; considera Recuperación (TSB ' + Math.round(tsbEff) + ').';
+      else if (hardYesterday && cat !== 'recuperacion' && cat !== 'resistencia') notice = 'Tu fatiga es alta; considera Recuperación (ayer reportaste un RPE de 9 o más).';
+    } else {
+      if (doneToday) { todayW = null; lead = ''; }
       if (focus === 'hoy') {
         if (todayW) { base = todayW; baseCat = todayW.category; }
         else {
-          baseCat = tsb < -10 ? 'recuperacion' : 'resistencia';
-          lead = 'Hoy no tienes sesión en tu plan (día de descanso): te proponemos un rodaje suave de ' + min + ' min. ';
+          baseCat = tsbEff < -10 ? 'recuperacion' : 'resistencia';
+          lead = doneToday ? '' : 'Hoy no tienes sesión en tu plan (día de descanso): te proponemos un rodaje suave de ' + min + ' min. ';
         }
       } else if (focus === 'auto') {
         if (todayW) baseCat = todayW.category === 'test' ? 'resistencia' : todayW.category;
+        else if (doneToday) baseCat = tsbEff < -10 ? 'recuperacion' : 'resistencia';
         else if (tsb > 0) {
           const q = upcoming.filter((w) => w && QUALITY.indexOf(w.category) >= 0)[0];
           baseCat = q ? q.category : 'sweetspot';
@@ -903,6 +934,7 @@
       }
       cat = soften(baseCat);
       if (cat !== baseCat) { notice = fatigueNotice; base = null; }
+      if (doneToday && (focus === 'auto' || focus === 'hoy')) notice = doneNotice + (notice ? ' ' + notice : '');
     }
     const idFor = () => 'tiempo-' + focus + '-' + min + '-' + today.replace(/-/g, '');
     const finish = (w) => {
@@ -924,12 +956,12 @@
         const M = T - (warmMin + coolMin) * 60;
         const cmp = compressItems(base, Math.max(M, 60));
         const mainSteps = padMain(cmp.items, Math.max(M, 60), base.category === 'recuperacion' ? 50 : 62);
-        const steps = [warm(warmMin, 45, base.category === 'recuperacion' ? 50 : 70)].concat(mainSteps, [cool(coolMin)]);
+        const steps = warmSteps(base.category, warmMin, base.category === 'recuperacion' ? 50 : 70).concat(mainSteps, [cool(coolMin)]);
         renumber(steps);
         const body = cmp.scaled || cmp.reps[1] === cmp.reps[0] ? 'bloques más cortos y recuperaciones proporcionales' : 'menos repeticiones (de ' + cmp.reps[0] + ' a ' + cmp.reps[1] + ') y recuperaciones proporcionales';
         return finish({
           id: idFor(), name: min + ' min · ' + base.name + ' (versión corta)', category: base.category,
-          description: 'Versión de ' + min + ' min de "' + base.name + '" (' + Math.round(base.durationS / 60) + ' min): mismo tipo de trabajo y misma intensidad, con ' + body + '. Calentamiento de ' + warmMin + ' min y ' + coolMin + ' min de vuelta a la calma.',
+          description: 'Versión de ' + min + ' min de "' + base.name + '" (' + Math.round(base.durationS / 60) + ' min): mismo tipo de trabajo y misma intensidad, con ' + body + '. Calentamiento de ' + warmMin + ' min y ' + coolMin + ' min de vuelta a la calma.' + fillerText(steps, min),
           basedOn: base.id, steps: steps,
         });
       }
@@ -940,11 +972,12 @@
     const M = T - (warmMin + coolMin) * 60;
     const fi = freshItems(cat, M);
     const soft = cat === 'recuperacion';
-    const steps = [soft ? st(warmMin * 60, 40, 'Calentamiento progresivo', { end: 50 }) : warm(warmMin, 45, cat === 'resistencia' ? 65 : 72)]
+    if (soft && M > 3600) notice = (notice ? notice + ' ' : '') + 'Una recuperación rinde hasta ~60 min: puedes terminar antes, tras el bloque principal; el tramo final es opcional.';
+    const steps = (soft ? [st(warmMin * 60, 40, 'Calentamiento progresivo', { end: 50 })] : warmSteps(cat, warmMin, cat === 'resistencia' ? 65 : 72))
       .concat(padMain(fi.items, M, soft ? 50 : 62), [soft ? st(coolMin * 60, 50, 'Vuelta a la calma', { end: 40 }) : cool(coolMin)]);
     const label = TIMED_LABEL[cat] + (min <= 45 ? ' exprés' : '');
     const struct = describeStructure(fi.plan);
-    const description = lead + (notice ? notice + ' ' : '') + TIMED_INTRO[cat] + ' Calentamiento de ' + warmMin + ' min' + (struct ? ', ' + struct : ', ' + fmtSpan(M) + ' de trabajo continuo') + ' y ' + coolMin + ' min de vuelta a la calma.';
+    const description = lead + (notice ? notice + ' ' : '') + TIMED_INTRO[cat] + ' Calentamiento de ' + warmMin + ' min' + (struct ? ', ' + struct : ', ' + fmtSpan(M) + ' de trabajo continuo') + ' y ' + coolMin + ' min de vuelta a la calma.' + fillerText(steps, min);
     return finish({ id: idFor(), name: min + ' min · ' + label, category: cat, description: description, steps: steps });
   }
 
