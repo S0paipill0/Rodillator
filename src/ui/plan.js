@@ -162,6 +162,7 @@
           el('div', { 'class': 'day-date' }, [el('span', null, dateLabel), isToday ? el('span', { 'class': 'status', style: { color: 'var(--gold)' } }, 'Hoy') : status ? el('span', { 'class': 'status status-' + status }, status === 'hecho' ? 'Hecha' : 'Saltada') : null]),
           el('div', { 'class': 'day-name' }, w.name),
           el('div', { 'class': 'day-meta' }, U.fmtDur(w.durationS) + ' · ' + Math.round(w.tss) + ' TSS'),
+          status === 'hecho' && typeof day.note === 'string' && day.note ? el('div', { 'class': 'day-note' }, day.note.charAt(0).toUpperCase() + day.note.slice(1)) : null,
           U.workoutProfile(w)
         ]);
       }
@@ -171,6 +172,10 @@
         var ftp = state().profile.ftp;
         var actions = [{ label: 'Cerrar' }];
         if (day && day.status !== 'hecho') actions.push({ label: 'Cambiar por otro', onClick: function () { setTimeout(function () { openSwap(w, day); }, 0); } });
+        if (day && day.date === U.todayStr() && day.status !== 'hecho' && w.durationS > 30 * 60) {
+          var shortMin = w.durationS > 45 * 60 ? 45 : 30;
+          actions.push({ label: 'Hacer versión corta', onClick: function () { ctx.navigate('rodar', { timed: { durationMin: shortMin, focus: 'hoy' } }); } });
+        }
         actions.push({ label: 'Rodar ahora', kind: 'primary', onClick: function () { ctx.navigate('rodar', { workoutId: w.id }); } });
         R.ui.modal({
           title: w.name,

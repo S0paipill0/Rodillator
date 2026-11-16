@@ -28,7 +28,7 @@ test('sin localStorage funciona solo en memoria', () => {
   assert.deepEqual(st.activities, []);
   assert.deepEqual(st.bests, {});
   assert.equal(st.schemaVersion, 1);
-  assert.deepEqual(st.settings, { reminderTime: '19:00', reminderDays: [1, 3, 5], ghostBoost: 0, botsCount: 6, units: 'metric', graphicsQuality: 'auto', coach: { voice: true, beeps: true, volume: 0.9, verbosity: 'completo' } });
+  assert.deepEqual(st.settings, { reminderTime: '19:00', reminderDays: [1, 3, 5], ghostBoost: 0, botsCount: 6, units: 'metric', graphicsQuality: 'auto', lastTimed: { durationMin: 45, focus: 'auto' }, coach: { voice: true, beeps: true, volume: 0.9, verbosity: 'completo' } });
   S.set({ profile: { name: 'Ana' } });
   S.flush();
   assert.equal(S.get().profile.name, 'Ana');

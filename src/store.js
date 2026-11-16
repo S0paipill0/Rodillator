@@ -14,7 +14,7 @@
       profile: null,
       plan: null,
       activities: [],
-      settings: { reminderTime: '19:00', reminderDays: [1, 3, 5], ghostBoost: 0, botsCount: 6, units: 'metric', graphicsQuality: 'auto', coach: { voice: true, beeps: true, volume: 0.9, verbosity: 'completo' } },
+      settings: { reminderTime: '19:00', reminderDays: [1, 3, 5], ghostBoost: 0, botsCount: 6, units: 'metric', graphicsQuality: 'auto', lastTimed: { durationMin: 45, focus: 'auto' }, coach: { voice: true, beeps: true, volume: 0.9, verbosity: 'completo' } },
       bests: {}
     };
   }
@@ -22,6 +22,14 @@
   var GRAPHICS_QUALITIES = ['auto', 'alta', 'media', 'baja'];
   // Calidad grafica de la escena 3D: valores fuera de la lista vuelven a 'auto'.
   function normalizeGraphicsQuality(q) { return GRAPHICS_QUALITIES.indexOf(q) >= 0 ? q : 'auto'; }
+
+  var TIMED_FOCUS = ['hoy', 'recuperacion', 'resistencia', 'tempo', 'sweetspot', 'umbral', 'vo2', 'sprints', 'sorpresa', 'auto'];
+  // Ultima duracion/enfoque de "entrenar por tiempo": duracion entera 15-150 min, enfoque conocido (si no, 'auto').
+  function normalizeLastTimed(v) {
+    var o = isObj(v) ? v : {};
+    var m = Math.round(Number(o.durationMin));
+    return { durationMin: isFinite(m) && m > 0 ? Math.min(150, Math.max(15, m)) : 45, focus: TIMED_FOCUS.indexOf(o.focus) >= 0 ? o.focus : 'auto' };
+  }
 
   function clone(v) { return v === undefined ? v : JSON.parse(JSON.stringify(v)); }
   function isObj(v) { return v !== null && typeof v === 'object' && !Array.isArray(v); }
@@ -47,6 +55,7 @@
     };
     s.settings.coach = Object.assign({}, defaults().settings.coach, isObj(s.settings.coach) ? s.settings.coach : {});
     s.settings.graphicsQuality = normalizeGraphicsQuality(s.settings.graphicsQuality);
+    s.settings.lastTimed = normalizeLastTimed(s.settings.lastTimed);
     return s;
   }
 
@@ -226,6 +235,7 @@
       if (k === 'settings' && isObj(patch.settings)) {
         next.settings = Object.assign({}, state.settings, patch.settings);
         next.settings.graphicsQuality = normalizeGraphicsQuality(next.settings.graphicsQuality);
+        next.settings.lastTimed = normalizeLastTimed(next.settings.lastTimed);
       }
       else next[k] = patch[k];
     });

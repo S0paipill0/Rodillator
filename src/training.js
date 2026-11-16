@@ -273,7 +273,24 @@
   const INTENSE = ['umbral', 'vo2', 'anaerobico'];
   const byId = {};
   library.forEach((w) => { byId[w.id] = w; });
-  const getWorkout = (id) => byId[id] || null;
+  // Generados (entrenar por tiempo): registro en memoria + copia compacta guardada en la actividad.
+  const registry = {};
+  function registerWorkout(w) { if (w && w.id) registry[w.id] = w; return w; }
+  function compactWorkout(w) {
+    return { id: w.id, name: w.name, category: w.category, durationS: w.durationS, tss: w.tss, steps: JSON.parse(JSON.stringify(w.steps)) };
+  }
+  function getWorkout(id, activities) {
+    if (byId[id]) return byId[id];
+    if (registry[id]) return registry[id];
+    const list = activities || [];
+    for (let i = list.length - 1; i >= 0; i--) {
+      const c = list[i] && list[i].workout;
+      if (c && c.id === id && Array.isArray(c.steps)) {
+        return registerWorkout(Object.assign({ description: '', generated: true }, JSON.parse(JSON.stringify(c))));
+      }
+    }
+    return null;
+  }
 
   // ======================================================================
   // Plan
@@ -573,7 +590,7 @@
   // Adaptación
   // ======================================================================
   function isIntenseActivity(a) {
-    const w = a.workoutId ? getWorkout(a.workoutId) : null;
+    const w = a.workoutId ? getWorkout(a.workoutId, [a]) : null;
     if (w) return INTENSE.indexOf(w.category) >= 0;
     return (a.if || 0) >= 0.9;
   }
@@ -583,7 +600,13 @@
     const next = JSON.parse(JSON.stringify(plan));
     const acts = (activities || []).filter((a) => localDate(a.date) <= today);
     const byDay = {};
-    acts.forEach((a) => { byDay[localDate(a.date)] = true; });
+    const shortBy = {};
+    acts.forEach((a) => {
+      const dt = localDate(a.date);
+      byDay[dt] = true;
+      const m = /^tiempo-hoy-(\d+)-/.exec(a.workoutId || '');
+      if (m) shortBy[dt] = +m[1];
+    });
     const all = [];
     next.weeks.forEach((w) => w.days.forEach((d) => all.push(d)));
     all.forEach((d) => {
@@ -591,6 +614,9 @@
       if (byDay[d.date]) d.status = 'hecho';
       else if (d.date < today) d.status = 'saltado';
       else d.status = 'pendiente';
+      // versión corta de la sesión del día (entrenar por tiempo): cuenta como hecha, con nota
+      if (d.status === 'hecho' && shortBy[d.date]) d.note = 'versión corta (' + shortBy[d.date] + ' min)';
+      else if (typeof d.note === 'string' && d.note.indexOf('versión corta') === 0) delete d.note;
     });
 
     const tsb = (pmc(acts, { days: 120, today: today }).pop() || { tsb: 0 }).tsb;
@@ -648,6 +674,311 @@
     const la = adapted.lastAdaptation;
     const reason = la && la.reason && !(prev && prev.date === today && prev.reason === la.reason) ? la.reason : null;
     return { plan: adapted, reason: reason };
+  }
+
+  // ======================================================================
+  // Entrenar por tiempo disponible
+  // ======================================================================
+  const TIMED_FOCUS = ['hoy', 'recuperacion', 'resistencia', 'tempo', 'sweetspot', 'umbral', 'vo2', 'sprints', 'sorpresa', 'auto'];
+  const FOCUS_CAT = { recuperacion: 'recuperacion', resistencia: 'resistencia', tempo: 'tempo', sweetspot: 'sweetspot', umbral: 'umbral', vo2: 'vo2', sprints: 'anaerobico' };
+  const TIMED_LABEL = { recuperacion: 'Recuperación activa', resistencia: 'Resistencia', tempo: 'Tempo', sweetspot: 'Sweet spot', umbral: 'Umbral', vo2: 'VO2máx', anaerobico: 'Sprints' };
+  const TIMED_INTRO = {
+    recuperacion: 'Rodaje regenerativo con pequeños giros rápidos: piernas sueltas y cero fatiga.',
+    resistencia: 'Base aeróbica a ritmo estable en zona 2: si puedes hablar en frases completas, vas en el punto justo.',
+    tempo: 'Trabajo firme pero sostenible en zona 3 para entrenar el ritmo de rodada larga.',
+    sweetspot: 'El mejor equilibrio entre estímulo y fatiga: mucha forma con poco desgaste.',
+    umbral: 'Trabajo en tu FTP para subir el umbral: concentración y potencia pareja desde el primer minuto.',
+    vo2: 'Intervalos cortos y exigentes para empujar tu techo aeróbico. Con menos tiempo hay menos repeticiones, pero la intensidad se mantiene.',
+    anaerobico: 'Sprints máximos de 10 segundos, de pie y con recuperación casi completa: potencia pura sin fatiga acumulada.',
+  };
+  // Bloques escalables: la duración del bloque se estira hasta llenar el tiempo (hasta wMax); si sobra, se agregan repeticiones (hasta nMax).
+  const STRETCH = {
+    tempo: { pct: 80, cad: 90, recPct: 55, r: 240, wMax: 1800, nMax: 3, label: 'Tempo' },
+    sweetspot: { pct: 90, cad: 90, recPct: 55, r: 240, wMax: 1200, nMax: 3, label: 'Sweet Spot' },
+    umbral: { pct: 100, cad: 90, recPct: 50, r: 300, wMax: 1200, nMax: 3, label: 'Umbral' },
+  };
+  // VO2: [minutos del bloque principal desde, repeticiones, trabajo s, recuperación s]; menos tiempo = menos repeticiones, misma intensidad
+  const VO2_TABLE = [[0, 3, 60, 90], [10, 3, 90, 90], [12, 4, 90, 90], [16, 4, 120, 150], [28, 5, 180, 180], [40, 5, 240, 240], [52, 6, 240, 240], [80, 6, 300, 300]];
+  const PHASE_POOL = {
+    base: ['resistencia', 'tempo', 'sweetspot'], construccion: ['sweetspot', 'umbral', 'tempo'],
+    especifico: ['umbral', 'vo2', 'sweetspot'], descarga: ['resistencia', 'recuperacion'], taper: ['resistencia', 'recuperacion'],
+  };
+  const QUALITY = ['tempo', 'sweetspot', 'umbral', 'vo2', 'anaerobico'];
+
+  const sumDur = (steps) => steps.reduce((a, s) => a + s.durationS, 0);
+  const avgPct = (s) => (s.powerPct + (s.powerPctEnd != null ? s.powerPctEnd : s.powerPct)) / 2;
+  function fmtSpan(sec) {
+    if (sec < 60) return Math.round(sec) + ' s';
+    const m = Math.floor(sec / 60), r = Math.round(sec % 60);
+    return r ? m + ' min ' + r + ' s' : m + ' min';
+  }
+
+  // Elementos del bloque principal: { steps: [...], rec: bool }. padMain llena el tiempo exacto.
+  function padMain(items, M, tailPct) {
+    const recs = items.filter((i) => i.rec);
+    let rem = M - items.reduce((a, i) => a + sumDur(i.steps), 0);
+    if (rem > 0 && recs.length) {
+      const mean = recs.reduce((a, i) => a + sumDur(i.steps), 0) / recs.length;
+      const e = Math.min(Math.floor(rem / recs.length), Math.floor(0.5 * mean));
+      recs.forEach((i) => { i.steps[0].durationS += e; });
+      rem -= e * recs.length;
+    }
+    const steps = flat(items.map((i) => i.steps));
+    if (rem >= 60) steps.push(st(rem, tailPct, 'Rodaje aeróbico suave', { cadence: 90 }));
+    else if (rem !== 0 && steps.length) steps[steps.length - 1].durationS += rem;
+    return steps;
+  }
+
+  // Calentamiento; en sesiones intensas con >= 8 min incluye 2 activaciones de 20 s al ~115 % al final.
+  function warmSteps(cat, warmMin, endPct) {
+    if ((cat === 'vo2' || cat === 'umbral' || cat === 'anaerobico') && warmMin >= 8) {
+      return [st(warmMin * 60 - 120, 45, 'Calentamiento progresivo', { end: endPct }),
+        st(20, 115, 'Activación 1/2', { cadence: 110 }), st(40, 50, 'Suave'), st(20, 115, 'Activación 2/2', { cadence: 110 }), st(40, 50, 'Suave')];
+    }
+    return [warm(warmMin, 45, endPct)];
+  }
+  // Frase sobre los pasos "de relleno" y las activaciones, para la descripción
+  function fillerText(steps, min) {
+    let t = '';
+    if (steps.some((x) => /^Activación/.test(x.label))) t += ' El calentamiento termina con dos activaciones de 20 s.';
+    const f = steps.filter((x) => x.label === 'Rodaje aeróbico suave')[0];
+    if (f) t += ' Para completar los ' + min + ' min se agrega un rodaje aeróbico suave de ' + fmtSpan(f.durationS) + ' tras los intervalos.';
+    return t;
+  }
+
+  function freshItems(cat, M) {
+    const work = (steps) => ({ steps: [].concat(steps), rec: false });
+    const rest = (step) => ({ steps: [step], rec: true });
+    if (cat === 'resistencia') return { items: [work(st(M, M >= 2400 ? 68 : 65, 'Ritmo aeróbico estable', { cadence: 90 }))], plan: { kind: 'steady' } };
+    if (cat === 'recuperacion') {
+      const Mw = Math.min(M, 3600); // tope de 60 min de bloque: más tiempo no mejora una recuperación
+      const n = Math.floor(Mw / 600), out = [];
+      for (let i = 0; i < n; i++) out.push(st(540, 50, 'Pedaleo suave'), st(60, 55, 'Giros rápidos', { cadence: 100 }));
+      if (Mw - n * 600 > 0) out.push(st(Mw - n * 600, 50, 'Pedaleo suave y fluido', { cadence: 90 }));
+      if (M > Mw) out.push(st(M - Mw, 50, 'Opcional: puedes terminar antes', { cadence: 90 }));
+      return { items: [work(out)], plan: { kind: 'steady' } };
+    }
+    let n, w, r, pct, rpct, name, ex;
+    if (STRETCH[cat]) {
+      const sp = STRETCH[cat];
+      r = sp.r; pct = sp.pct; rpct = sp.recPct; name = sp.label; ex = { cadence: sp.cad };
+      for (n = 1; n <= sp.nMax; n++) { w = (M - (n - 1) * r) / n; if (w <= sp.wMax) break; }
+      if (n > sp.nMax) { n = sp.nMax; w = sp.wMax; }
+      w = Math.floor(w / 10) * 10;
+    } else if (cat === 'vo2') {
+      const mm = M / 60;
+      const row = VO2_TABLE.filter((x) => x[0] <= mm).pop();
+      n = row[1]; w = row[2]; r = row[3]; pct = 115; rpct = 50; name = 'VO2'; ex = { cadence: 95 };
+    } else { // anaerobico: sprints
+      w = 10; r = 180; n = clamp(Math.floor((M + r) / (w + r)), 3, 8); pct = 200; rpct = 50; name = 'Sprint'; ex = { cadence: 120, position: 'pie' };
+    }
+    const items = [];
+    for (let i = 1; i <= n; i++) {
+      items.push(work(st(w, pct, n > 1 ? name + ' ' + i + '/' + n : name, ex)));
+      if (i < n) items.push(rest(st(r, rpct, cat === 'anaerobico' ? 'Recuperación completa' : 'Recuperación suave')));
+    }
+    return { items: items, plan: { kind: 'blocks', n: n, w: w, r: r, pct: pct } };
+  }
+
+  function describeStructure(p) {
+    if (p.kind !== 'blocks') return '';
+    if (p.n === 1) return fmtSpan(p.w) + ' continuos al ' + p.pct + ' % de tu FTP';
+    return p.n + '×' + fmtSpan(p.w) + ' al ' + p.pct + ' % de tu FTP con ' + fmtSpan(p.r) + ' de recuperación';
+  }
+
+  // Separa una sesión en calentamiento / principal / enfriamiento y el principal en grupos de trabajo y pausas largas.
+  function splitSession(w) {
+    const s = w.steps;
+    let a = 0, b = s.length;
+    if (s.length > 2 && /alentamiento|^Entrada/i.test(s[0].label || '')) a = 1;
+    if (b - a > 1 && /^Vuelta|^Soltar/i.test(s[b - 1].label || '')) b--;
+    const main = s.slice(a, b);
+    const peak = Math.max.apply(null, main.map((x) => Math.max(x.powerPct, x.powerPctEnd != null ? x.powerPctEnd : 0)));
+    const groups = [], breaks = [];
+    let cur = [];
+    main.forEach((x) => {
+      if (avgPct(x) < 0.75 * peak && x.durationS >= 120 && cur.length) { groups.push(cur); breaks.push(x); cur = []; } else cur.push(x);
+    });
+    if (cur.length) groups.push(cur);
+    else if (breaks.length) breaks.pop();
+    return { groups: groups, breaks: breaks };
+  }
+
+  // Recorta un grupo de trabajo a la fracción s de su duración (un paso se acorta; varios pasos se cortan en un límite de paso).
+  function scaleGroup(g, s) {
+    const clone = g.map((x) => Object.assign({}, x));
+    if (clone.length === 1) { clone[0].durationS = Math.max(10, Math.floor((clone[0].durationS * s) / 5) * 5); return clone; }
+    const lim = sumDur(clone) * s, out = [];
+    let acc = 0;
+    for (const x of clone) { if (out.length && acc + x.durationS > lim) break; out.push(x); acc += x.durationS; }
+    return out;
+  }
+
+  // Numeración coherente ("3/5", "(serie 1/2)") tras quitar repeticiones.
+  function renumber(steps) {
+    const SER = /\((serie|bloque) (\d+)\/(\d+)\)/, LEAD = / \d+\/\d+/;
+    const sv = [];
+    steps.forEach((x) => { const m = SER.exec(x.label || ''); if (m && sv.indexOf(m[1] + m[2]) < 0) sv.push(m[1] + m[2]); });
+    steps.forEach((x) => { if (SER.test(x.label || '')) x.label = x.label.replace(SER, (_, wd, i) => '(' + wd + ' ' + (sv.indexOf(wd + i) + 1) + '/' + sv.length + ')'); });
+    // las pausas internas ("Pausa 3/8") heredan la serie del paso de trabajo anterior
+    let ser = '';
+    const key = (x) => { const m = SER.exec(x.label || ''); if (m) ser = m[1] + m[2]; return x.label.replace(LEAD, ' #').replace(SER, '') + '|' + ser; };
+    const total = {}, seen = {};
+    const keys = steps.map((x) => (LEAD.test(x.label || '') || SER.test(x.label || '') ? key(x) : null));
+    steps.forEach((x, i) => { if (keys[i] && LEAD.test(x.label || '')) total[keys[i]] = (total[keys[i]] || 0) + 1; });
+    steps.forEach((x, i) => {
+      if (!keys[i] || !LEAD.test(x.label || '')) return;
+      seen[keys[i]] = (seen[keys[i]] || 0) + 1;
+      x.label = x.label.replace(LEAD, ' ' + seen[keys[i]] + '/' + total[keys[i]]);
+    });
+  }
+
+  function compressItems(orig, M) {
+    const sp = splitSession(orig);
+    const n = sp.groups.length;
+    const gd = sp.groups.map(sumDur);
+    const b = sp.breaks.length ? Math.round(sp.breaks.reduce((a, x) => a + x.durationS, 0) / sp.breaks.length) : 0;
+    const brk = (dur) => Object.assign({}, sp.breaks[0] || {}, { durationS: dur });
+    const need = (idx) => idx.reduce((a, i) => a + gd[i], 0) + (idx.length - 1) * b;
+    // k grupos más largos, en su orden original
+    const pickK = (k) => gd.map((d, i) => [d, i]).sort((x, y) => y[0] - x[0] || x[1] - y[1]).slice(0, k).map((x) => x[1]).sort((x, y) => x - y);
+    let k = n;
+    while (k > 1 && need(pickK(k)) > M) k--;
+    let idx = pickK(k);
+    let groups = idx.map((i) => sp.groups[i].map((x) => Object.assign({}, x)));
+    let bdur = b, scaled = false;
+    if (need(idx) > M || (k < Math.min(2, n))) {
+      k = Math.min(2, n); idx = pickK(k);
+      const s = M / need(idx);
+      scaled = true;
+      groups = idx.map((i) => scaleGroup(sp.groups[i], s));
+      bdur = Math.max(60, Math.floor((b * s) / 5) * 5);
+    }
+    const items = [];
+    groups.forEach((g, i) => {
+      items.push({ steps: g, rec: false });
+      if (i < groups.length - 1) items.push({ steps: [brk(bdur)], rec: true });
+    });
+    return { items: items, reps: [n, groups.length], scaled: scaled };
+  }
+
+  function timedWorkout(o) {
+    o = o || {};
+    const min = o.durationMin;
+    if (typeof min !== 'number' || !isFinite(min) || Math.floor(min) !== min) throw new Error('La duración debe ser un número entero de minutos entre 15 y 150.');
+    if (min < 15 || min > 150) throw new Error('La duración debe estar entre 15 y 150 minutos.');
+    const focus = o.focus == null ? 'auto' : o.focus;
+    if (TIMED_FOCUS.indexOf(focus) < 0) throw new Error('Enfoque no válido: "' + focus + '".');
+    const today = todayStr(o.today);
+    const acts = o.activities || [];
+    const T = min * 60;
+
+    // forma y fatiga
+    const tsb = (pmc(acts, { days: 120, today: today }).pop() || { tsb: 0 }).tsb;
+    const yesterday = addDays(today, -1);
+    const hardYesterday = acts.some((a) => localDate(a.date) === yesterday && a.rpe != null && a.rpe >= 9);
+
+    // sesión de hoy y fase del plan
+    let todayW = null, phase = null, todayStatus = null;
+    const upcoming = [];
+    if (o.plan && o.plan.weeks) {
+      o.plan.weeks.forEach((wk) => wk.days.forEach((d) => {
+        if (d.date === today) { phase = wk.phase; if (d.workoutId) { todayW = getWorkout(d.workoutId); todayStatus = d.status; } }
+        else if (d.date > today && d.date <= addDays(today, 7) && d.workoutId && d.status === 'pendiente') upcoming.push(getWorkout(d.workoutId));
+      }));
+    }
+
+    // la sesión de hoy ya hecha: hoy cuenta como día de descanso y su TSS suma a la fatiga
+    const actsToday = acts.filter((a) => localDate(a.date) === today);
+    const tssToday = actsToday.reduce((a, x) => a + (Number(x.tss) || 0), 0);
+    const doneToday = !!todayW && (todayStatus === 'hecho' || actsToday.length > 0);
+    const tsbEff = tsb - tssToday * (1 / 7 - 1 / 42);
+    const tiredNow = tsbEff < -25;
+    const soften = (cat) => {
+      if (tiredNow) return cat === 'recuperacion' ? cat : 'recuperacion';
+      if (hardYesterday) return cat === 'recuperacion' || cat === 'resistencia' ? cat : 'resistencia';
+      return cat;
+    };
+    const fatigueNotice = tiredNow
+      ? 'Tu fatiga acumulada es alta (TSB ' + Math.round(tsbEff) + '), así que hoy priorizamos recuperar con un rodaje suave.'
+      : 'Ayer reportaste un esfuerzo percibido (RPE) de 9 o más, así que hoy bajamos la intensidad a un rodaje aeróbico.';
+
+    let cat, notice = null, lead = '';
+    let baseCat = null, base = null;
+    const doneNotice = 'Ya completaste la sesión de hoy: te proponemos un rodaje suave para sumar sin acumular fatiga.';
+    if (FOCUS_CAT[focus]) {
+      cat = FOCUS_CAT[focus];
+      // enfoque explícito: se respeta, con advertencia no bloqueante si la fatiga es alta
+      if (tiredNow && cat !== 'recuperacion') notice = 'Tu fatiga es alta; considera Recuperación (TSB ' + Math.round(tsbEff) + ').';
+      else if (hardYesterday && cat !== 'recuperacion' && cat !== 'resistencia') notice = 'Tu fatiga es alta; considera Recuperación (ayer reportaste un RPE de 9 o más).';
+    } else {
+      if (doneToday) { todayW = null; lead = ''; }
+      if (focus === 'hoy') {
+        if (todayW) { base = todayW; baseCat = todayW.category; }
+        else {
+          baseCat = tsbEff < -10 ? 'recuperacion' : 'resistencia';
+          lead = doneToday ? '' : 'Hoy no tienes sesión en tu plan (día de descanso): te proponemos un rodaje suave de ' + min + ' min. ';
+        }
+      } else if (focus === 'auto') {
+        if (todayW) baseCat = todayW.category === 'test' ? 'resistencia' : todayW.category;
+        else if (doneToday) baseCat = tsbEff < -10 ? 'recuperacion' : 'resistencia';
+        else if (tsb > 0) {
+          const q = upcoming.filter((w) => w && QUALITY.indexOf(w.category) >= 0)[0];
+          baseCat = q ? q.category : 'sweetspot';
+          lead = 'Estás fresco (TSB ' + Math.round(tsb) + ')' + (q ? ' y esta semana te toca trabajo de ' + (TIMED_LABEL[q.category] || q.category).toLowerCase() : '') + ': aprovechamos el tiempo con calidad. ';
+        } else baseCat = 'resistencia';
+      } else { // sorpresa
+        const pool = PHASE_POOL[phase] || PHASE_POOL.base;
+        baseCat = pool[(dayNum(today) + min) % pool.length];
+        lead = 'Sesión sorpresa acorde a tu fase' + (phase ? ' (' + phase + ')' : '') + '. ';
+      }
+      cat = soften(baseCat);
+      if (cat !== baseCat) { notice = fatigueNotice; base = null; }
+      if (doneToday && (focus === 'auto' || focus === 'hoy')) notice = doneNotice + (notice ? ' ' + notice : '');
+    }
+    const idFor = () => 'tiempo-' + focus + '-' + min + '-' + today.replace(/-/g, '');
+    const finish = (w) => {
+      w.durationS = sumDur(w.steps);
+      w.tss = r1(w.steps.reduce((a, s) => a + stepTss(s), 0));
+      if (w.durationS !== T) throw new Error('La sesión por tiempo no suma ' + min + ' min.');
+      w.generated = true; w.focus = focus; w.notice = notice;
+      return w;
+    };
+
+    // 'hoy': sesión del plan tal cual si cabe, comprimida si no
+    if (focus === 'hoy' && base) {
+      if (base.durationS <= T) return base;
+      if (base.category === 'test') {
+        cat = 'resistencia';
+        notice = 'El test "' + base.name + '" dura ' + Math.round(base.durationS / 60) + ' min y no cabe en ' + min + ' min: hoy rodamos resistencia y dejas el test para un día con más tiempo.';
+      } else {
+        const warmMin = clamp(Math.round(0.15 * min), 5, 15), coolMin = Math.max(3, Math.round(0.1 * min));
+        const M = T - (warmMin + coolMin) * 60;
+        const cmp = compressItems(base, Math.max(M, 60));
+        const mainSteps = padMain(cmp.items, Math.max(M, 60), base.category === 'recuperacion' ? 50 : 62);
+        const steps = warmSteps(base.category, warmMin, base.category === 'recuperacion' ? 50 : 70).concat(mainSteps, [cool(coolMin)]);
+        renumber(steps);
+        const body = cmp.scaled || cmp.reps[1] === cmp.reps[0] ? 'bloques más cortos y recuperaciones proporcionales' : 'menos repeticiones (de ' + cmp.reps[0] + ' a ' + cmp.reps[1] + ') y recuperaciones proporcionales';
+        return finish({
+          id: idFor(), name: min + ' min · ' + base.name + ' (versión corta)', category: base.category,
+          description: 'Versión de ' + min + ' min de "' + base.name + '" (' + Math.round(base.durationS / 60) + ' min): mismo tipo de trabajo y misma intensidad, con ' + body + '. Calentamiento de ' + warmMin + ' min y ' + coolMin + ' min de vuelta a la calma.' + fillerText(steps, min),
+          basedOn: base.id, steps: steps,
+        });
+      }
+    }
+
+    // sesión nueva por categoría
+    const warmMin = clamp(Math.round(0.15 * min), 5, 15), coolMin = Math.max(3, Math.round(0.1 * min));
+    const M = T - (warmMin + coolMin) * 60;
+    const fi = freshItems(cat, M);
+    const soft = cat === 'recuperacion';
+    if (soft && M > 3600) notice = (notice ? notice + ' ' : '') + 'Una recuperación rinde hasta ~60 min: puedes terminar antes, tras el bloque principal; el tramo final es opcional.';
+    const steps = (soft ? [st(warmMin * 60, 40, 'Calentamiento progresivo', { end: 50 })] : warmSteps(cat, warmMin, cat === 'resistencia' ? 65 : 72))
+      .concat(padMain(fi.items, M, soft ? 50 : 62), [soft ? st(coolMin * 60, 50, 'Vuelta a la calma', { end: 40 }) : cool(coolMin)]);
+    const label = TIMED_LABEL[cat] + (min <= 45 ? ' exprés' : '');
+    const struct = describeStructure(fi.plan);
+    const description = lead + (notice ? notice + ' ' : '') + TIMED_INTRO[cat] + ' Calentamiento de ' + warmMin + ' min' + (struct ? ', ' + struct : ', ' + fmtSpan(M) + ' de trabajo continuo') + ' y ' + coolMin + ' min de vuelta a la calma.' + fillerText(steps, min);
+    return finish({ id: idFor(), name: min + ' min · ' + label, category: cat, description: description, steps: steps });
   }
 
   // ======================================================================
@@ -781,5 +1112,9 @@
     motivation: motivation,
     motivationPhrases: motivationPhrases,
     targetPowerAt: targetPowerAt,
+    timedWorkout: timedWorkout,
+    registerWorkout: registerWorkout,
+    compactWorkout: compactWorkout,
+    TIMED_FOCUS: TIMED_FOCUS,
   };
 })(typeof window !== 'undefined' ? (window.R = window.R || {}) : (globalThis.R = globalThis.R || {}));
