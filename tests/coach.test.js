@@ -1,6 +1,8 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert');
+const fs = require('node:fs');
+const path = require('node:path');
 require('../src/coach.js');
 const C = globalThis.R.coach;
 
@@ -248,8 +250,10 @@ test('ruta: cuenta a la meta con velocidad estimada y ¡Meta!', () => {
 });
 
 test('ajustes: normalización compatible con estados guardados', () => {
-  assert.deepStrictEqual(C.normalizeSettings(undefined), { voice: true, beeps: true, volume: 0.9, verbosity: 'completo' });
-  assert.deepStrictEqual(C.normalizeSettings({ volume: 5, verbosity: 'x', voice: false }), { voice: false, beeps: true, volume: 1, verbosity: 'completo' });
+  assert.deepStrictEqual(C.normalizeSettings(undefined), { voice: true, beeps: true, volume: 1.6, verbosity: 'completo', natural: true });
+  assert.deepStrictEqual(C.normalizeSettings({ volume: 5, verbosity: 'x', voice: false, natural: false }), { voice: false, beeps: true, volume: 2, verbosity: 'completo', natural: false });
+  assert.strictEqual(C.normalizeSettings({ volume: 0 }).volume, 0);
+  assert.strictEqual(C.normalizeSettings({ volume: 1.3 }).volume, 1.3);
 });
 
 // ---------- motor de audio con entorno simulado ----------
@@ -435,4 +439,201 @@ test('audio: reanuda el contexto si no está running (iOS interrupted) y atrapa 
   a.beep('tick');
   assert.strictEqual(resumes, 1);
   assert.doesNotThrow(() => a.dispose());
+});
+
+// ---------- tarea 15: avisos nuevos ----------
+test('prioridades: cuenta > resistencia > postura > ataque > hidratación > siguiente > resto', () => {
+  const P = C.PRIORITY;
+  assert.ok(P.COUNT > P.RESIST && P.RESIST > P.POSTURE && P.POSTURE > P.ATTACK && P.ATTACK > P.HYDRATE && P.HYDRATE > P.NEXT && P.NEXT > P.REST);
+});
+
+test('evento resistance: nivel, sube y baja, con prioridad RESIST', () => {
+  const r = rig();
+  r.coach.event('resistance', { level: 5 });
+  r.clock.t = 10000; r.coach.event('resistance', { level: 6, prev: 5, reason: 'pendiente' });
+  r.clock.t = 20000; r.coach.event('resistance', { level: 3, prev: 6, reason: 'intervalo' });
+  r.clock.t = 30000; r.coach.event('resistance', { level: 4, prev: 4 });
+  assert.deepStrictEqual(r.texts(), ['Resistencia 5', 'Sube a resistencia 6', 'Baja a resistencia 3', 'Resistencia 4']);
+  r.log.filter((e) => e[0] === 'say').forEach((e) => assert.strictEqual(e[2], C.PRIORITY.RESIST));
+});
+
+test('evento hydrate: avisa con la duración y dice "Seguimos" al cumplirse', () => {
+  const r = rig();
+  r.clock.t = 0;
+  r.coach.update({ mode: 'workout', tS: 100, paused: false, workout: { steps: [st(600, 50)] }, ftp: FTP, stepIndex: 0, stepElapsedS: 0, stepRemainingS: 600, distM: 0, routeLenM: 1 });
+  r.clock.t = 100000;
+  r.coach.event('hydrate', { durationS: 45 });
+  assert.strictEqual(r.texts().pop(), 'Hidratación: toma agua, 45 segundos');
+  const upd = (tS) => { r.clock.t = tS * 1000; r.coach.update({ mode: 'workout', tS, paused: false, workout: { steps: [st(600, 50)] }, ftp: FTP, stepIndex: 0, stepElapsedS: tS - 100, stepRemainingS: 700 - tS, distM: 0, routeLenM: 1 }); };
+  upd(120); assert.ok(!r.texts().includes('Seguimos'));
+  upd(144); assert.ok(!r.texts().includes('Seguimos'));
+  upd(146); assert.strictEqual(r.texts().filter((x) => x === 'Seguimos').length, 1);
+  upd(160); assert.strictEqual(r.texts().filter((x) => x === 'Seguimos').length, 1);
+  const last = r.log.filter((e) => e[1] === 'Seguimos').pop(); assert.strictEqual(last[2], C.PRIORITY.HYDRATE);
+  r.coach.event('hydrate', { durationS: 90 });
+  assert.strictEqual(r.texts().pop(), 'Hidratación: toma agua, 1 minuto y medio');
+});
+
+test('evento attack: inicio, alcanzado y se escapó', () => {
+  const r = rig();
+  r.coach.event('attack', { phase: 'start', gapS: 0 });
+  r.clock.t = 5000; r.coach.event('attack', { phase: 'caught', gapS: 2 });
+  r.clock.t = 10000; r.coach.event('attack', { phase: 'dropped', gapS: 30 });
+  r.clock.t = 15000; r.coach.event('attack', { phase: 'end' }); // sin texto
+  assert.deepStrictEqual(r.texts(), ['¡El pelotón ataca! Síguelos', 'Bien, sigues con el grupo', 'Se te escapó el grupo, ¡vamos!']);
+  r.log.filter((e) => e[0] === 'say').forEach((e) => assert.strictEqual(e[2], C.PRIORITY.ATTACK));
+});
+
+test('la cola atiende por prioridad: resistencia antes que hidratación', () => {
+  const r = rig();
+  r.coach.event('pause'); // deja ocupado el canal
+  const n = r.texts().length;
+  r.coach.event('hydrate', { durationS: 30 });
+  r.coach.event('attack', { phase: 'start' });
+  r.coach.event('resistance', { level: 7, prev: 6 });
+  r.clock.t = 5000; r.coach.event('resume');
+  for (const t of [9, 14, 19]) { r.clock.t = t * 1000; r.coach.update({ mode: 'free', tS: t, paused: false }); }
+  const out = r.texts().slice(n);
+  assert.deepStrictEqual(out.slice(0, 3), ['Sube a resistencia 7', '¡El pelotón ataca! Síguelos', 'Hidratación: toma agua, 30 segundos']);
+});
+
+test('verbosidad esencial deja pasar resistencia, ataque e hidratación', () => {
+  const r = rig('esencial');
+  r.coach.event('resistance', { level: 4, prev: 3 });
+  r.clock.t = 10000; r.coach.event('attack', { phase: 'start' });
+  r.clock.t = 20000; r.coach.event('hydrate', { durationS: 30 });
+  assert.strictEqual(r.texts().length, 3);
+  const q = rig('off'); q.coach.event('resistance', { level: 4, prev: 3 });
+  assert.strictEqual(q.texts().length, 0);
+});
+
+// ---------- tarea 15: voz pregrabada ----------
+require('../src/voicepack.js');
+function packEnv(extra) {
+  const f = fakeEnv();
+  const started = [], chain = [];
+  const clips = {};
+  globalThis.R.voicepack.VOCAB.forEach((e) => { clips[e.key] = Buffer.from('x').toString('base64'); });
+  f.env.atob = (b) => Buffer.from(b, 'base64').toString('binary');
+  const C0 = f.env.AudioContext;
+  f.env.AudioContext = class extends C0 {
+    decodeAudioData(ab) { return Promise.resolve({ duration: 0.5 }); }
+    createDynamicsCompressor() { const c = { threshold: {}, ratio: {}, knee: {}, attack: {}, release: {}, connect(d) { chain.push(['comp', d]); } }; chain.push(['createComp', c]); return c; }
+    createGain() { const g = { gain: { value: 1, setValueAtTime() {}, linearRampToValueAtTime() {}, exponentialRampToValueAtTime() {} }, connect(d) { chain.push(['gain->', d]); } }; return g; }
+    createBufferSource() { const s = { buffer: null, connect(d) { this.dest = d; }, start(t) { started.push([this, t]); }, stop() { this.stopped = true; } }; return s; }
+  };
+  f.env.R_VOICE = { voice: 'test', license: 'MIT', clips };
+  return Object.assign(f, { started, chain });
+}
+const settle = () => new Promise((r) => setImmediate(r));
+
+test('voz natural: decodifica el pack una vez, concatena clips y no usa speechSynthesis ni Audio', async () => {
+  const f = packEnv();
+  f.env.Audio = function () { throw new Error('no debe usarse'); };
+  const a = C.createAudio({ env: f.env, volume: 1.6, now: f.now });
+  a.unlock(); await settle();
+  assert.strictEqual(a.say('Resistencia 5', { priority: C.PRIORITY.RESIST }), true);
+  assert.strictEqual(f.started.length, 2);
+  assert.strictEqual(f.spoken.filter((u) => u.text.trim()).length, 0);
+  // clips consecutivos sin solaparse
+  assert.ok(f.started[1][1] > f.started[0][1] + 0.5 - 1e-9);
+  // cadena: Gain(volumen) -> compresor -> destino
+  const comp = f.chain.find((c) => c[0] === 'createComp')[1];
+  assert.strictEqual(comp.threshold.value, -18); assert.strictEqual(comp.ratio.value, 4); assert.strictEqual(comp.knee.value, 6);
+  assert.ok(f.chain.some((c) => c[0] === 'comp' && c[1] === f.ctxs()[0].destination));
+  assert.strictEqual(f.started[0][0].dest.gain.value, 1.6);
+  a.setVolume(2); assert.strictEqual(f.started[0][0].dest.gain.value, 2);
+});
+
+test('voz natural: frase no componible o natural=false cae a speechSynthesis', async () => {
+  const f = packEnv();
+  const a = C.createAudio({ env: f.env, now: f.now });
+  a.unlock(); await settle();
+  a.say('No pudimos guardar la rodada', { priority: 1 });
+  assert.strictEqual(f.started.length, 0);
+  assert.strictEqual(f.spoken[f.spoken.length - 1].text, 'No pudimos guardar la rodada');
+  a.setEnabled({ natural: false });
+  a.say('Pausa', { priority: 1 });
+  assert.strictEqual(f.started.length, 0);
+  assert.strictEqual(f.spoken[f.spoken.length - 1].text, 'Pausa');
+  // el volumen de speechSynthesis se limita a 1
+  a.setVolume(2); a.say('Seguimos', { priority: 1 });
+  assert.strictEqual(f.spoken[f.spoken.length - 1].volume, 1);
+});
+
+test('voz natural: sin pack o antes de decodificar usa speechSynthesis; la cuenta corta lo que suena', async () => {
+  const f0 = packEnv(); delete f0.env.R_VOICE;
+  const a0 = C.createAudio({ env: f0.env }); a0.unlock(); a0.say('Pausa', { priority: 1 });
+  assert.strictEqual(f0.started.length, 0);
+  const f = packEnv();
+  const a = C.createAudio({ env: f.env, now: f.now });
+  a.unlock();
+  a.say('Pausa', { priority: 1 }); // aún decodificando
+  assert.strictEqual(f.started.length, 0);
+  await settle();
+  a.say('Hidratación: toma agua, 45 segundos', { priority: C.PRIORITY.HYDRATE });
+  const first = f.started.slice();
+  a.say('Tres', { priority: C.PRIORITY.COUNT });
+  assert.ok(first.every((s) => s[0].stopped), 'la cuenta regresiva corta el aviso en curso');
+});
+
+test('voz natural: test() espera la decodificación y reproduce clips del pack', async () => {
+  const f = packEnv();
+  const a = C.createAudio({ env: f.env, now: f.now });
+  a.test();
+  await settle(); await settle();
+  assert.ok(f.started.length >= 5);
+});
+
+test('voz natural: setEnabled({voice:false}) y stop() detienen los clips programados y liberan la cola', async () => {
+  const f = packEnv();
+  const a = C.createAudio({ env: f.env, now: f.now });
+  a.unlock(); await settle();
+  a.say('Hidratación: toma agua, 45 segundos', { priority: C.PRIORITY.HYDRATE });
+  const first = f.started.slice();
+  assert.ok(first.length >= 2);
+  a.setEnabled({ voice: false });
+  assert.ok(first.every((s) => s[0].stopped), 'voice:false detiene los nodos');
+  a.setEnabled({ voice: true });
+  const n0 = f.started.length;
+  a.say('Pausa', { priority: 1 });
+  const s2 = f.started.slice(n0);
+  assert.ok(s2.length >= 1 && s2[0][1] <= f.ctxs()[0].currentTime + 0.05, 'la cola quedó libre (nextFree = ahora)');
+  a.stop();
+  assert.ok(s2.every((s) => s[0].stopped), 'stop() detiene lo programado (pausa)');
+});
+
+test('voz natural: caché de AudioBuffer a nivel de módulo; precarga vamos y 1..3 primero', async () => {
+  const f = packEnv();
+  const order = [];
+  const Base = f.env.AudioContext;
+  f.env.AudioContext = class extends Base {
+    decodeAudioData(ab) { order.push(1); return super.decodeAudioData(ab); }
+  };
+  // clips distinguibles para conocer el orden de decodificación
+  const keys = Object.keys(f.env.R_VOICE.clips);
+  const seq = [];
+  keys.forEach((k) => { f.env.R_VOICE.clips[k] = Buffer.from(k).toString('base64'); });
+  f.env.AudioContext = class extends Base {
+    decodeAudioData(ab) { seq.push(Buffer.from(ab).toString()); return Promise.resolve({ duration: 0.5 }); }
+  };
+  const a1 = C.createAudio({ env: f.env, now: f.now });
+  a1.unlock();
+  assert.deepStrictEqual(seq.slice(0, 4), ['vamos', 'n1', 'n2', 'n3']);
+  await settle(); await settle();
+  const total = seq.length;
+  assert.strictEqual(total, keys.length);
+  a1.dispose();
+  const a2 = C.createAudio({ env: f.env, now: f.now });
+  a2.unlock(); await settle();
+  assert.strictEqual(seq.length, total, 'otra instancia reutiliza los buffers sin decodificar');
+  assert.strictEqual(a2.say('Tres, dos, uno', { priority: C.PRIORITY.COUNT }), true);
+  assert.strictEqual(f.spoken.filter((u) => u.text.trim()).length, 0, 'sin respaldo a speechSynthesis');
+});
+
+test('ride.js pasa natural a createAudio y a setEnabled; la pausa llama audio.stop()', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'ui', 'ride.js'), 'utf8');
+  assert.match(src, /createAudio\(\{[^}]*natural: cs\.natural/);
+  assert.match(src, /audio\.setEnabled\(\{[^}]*natural: cs\.natural/);
+  assert.match(src, /audio\.stop\(\)/);
 });

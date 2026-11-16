@@ -14,7 +14,7 @@
       profile: null,
       plan: null,
       activities: [],
-      settings: { reminderTime: '19:00', reminderDays: [1, 3, 5], ghostBoost: 0, botsCount: 6, units: 'metric', graphicsQuality: 'auto', lastTimed: { durationMin: 45, focus: 'auto' }, coach: { voice: true, beeps: true, volume: 0.9, verbosity: 'completo' } },
+      settings: { reminderTime: '19:00', reminderDays: [1, 3, 5], ghostBoost: 0, botsCount: 6, units: 'metric', graphicsQuality: 'auto', lastTimed: { durationMin: 45, focus: 'auto' }, coach: { voice: true, beeps: true, volume: 1.6, verbosity: 'completo', natural: true, volumeV2: true } },
       bests: {}
     };
   }
@@ -22,6 +22,21 @@
   var GRAPHICS_QUALITIES = ['auto', 'alta', 'media', 'baja'];
   // Calidad grafica de la escena 3D: valores fuera de la lista vuelven a 'auto'.
   function normalizeGraphicsQuality(q) { return GRAPHICS_QUALITIES.indexOf(q) >= 0 ? q : 'auto'; }
+
+  // Coach de voz: volumen 0..2 (1 = 100 %, por defecto 1.6). Los estados anteriores a la escala nueva (sin volumeV2) traían
+  // 0.9 como valor por defecto: si nunca se editó (0.9 o ausente) pasa a 1.6; un valor editado se respeta. `migrate` solo en carga.
+  function normalizeCoach(raw, migrate) {
+    var d = defaults().settings.coach;
+    var c = Object.assign({}, d, isObj(raw) ? raw : {});
+    var v = Number(c.volume);
+    var okVol = c.volume !== null && c.volume !== '' && c.volume !== undefined && isFinite(v);
+    if (migrate && !(isObj(raw) && raw.volumeV2 === true)) {
+      c.volume = (!okVol || v === 0.9) ? d.volume : Math.min(2, Math.max(0, v));
+    } else c.volume = okVol ? Math.min(2, Math.max(0, v)) : d.volume;
+    c.natural = c.natural === undefined ? d.natural : !!c.natural;
+    c.volumeV2 = true;
+    return c;
+  }
 
   var TIMED_FOCUS = ['hoy', 'recuperacion', 'resistencia', 'tempo', 'sweetspot', 'umbral', 'vo2', 'sprints', 'sorpresa', 'auto'];
   // Ultima duracion/enfoque de "entrenar por tiempo": duracion entera 15-150 min, enfoque conocido (si no, 'auto').
@@ -53,7 +68,7 @@
       settings: Object.assign(d.settings, isObj(raw.settings) ? raw.settings : {}),
       bests: isObj(raw.bests) ? raw.bests : {}
     };
-    s.settings.coach = Object.assign({}, defaults().settings.coach, isObj(s.settings.coach) ? s.settings.coach : {});
+    s.settings.coach = normalizeCoach(s.settings.coach, true);
     s.settings.graphicsQuality = normalizeGraphicsQuality(s.settings.graphicsQuality);
     s.settings.lastTimed = normalizeLastTimed(s.settings.lastTimed);
     return s;
@@ -236,6 +251,7 @@
         next.settings = Object.assign({}, state.settings, patch.settings);
         next.settings.graphicsQuality = normalizeGraphicsQuality(next.settings.graphicsQuality);
         next.settings.lastTimed = normalizeLastTimed(next.settings.lastTimed);
+        next.settings.coach = normalizeCoach(next.settings.coach, false);
       }
       else next[k] = patch[k];
     });

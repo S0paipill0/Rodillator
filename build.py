@@ -10,7 +10,7 @@ import sys
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 SCRIPT_ORDER = [
-    'store', 'training', 'physics', 'routes', 'riders', 'vendor/gltfloader', 'cyclist', 'scene3d', 'devices', 'integrations', 'coach',
+    'store', 'training', 'physics', 'routes', 'riders', 'vendor/gltfloader', 'cyclist', 'scene3d', 'devices', 'integrations', 'voicepack', 'coach',
     'ui/shell', 'ui/onboarding', 'ui/plan', 'ui/routes', 'ui/settings', 'ui/ride', 'ui/stats', 'app',
 ]
 MAX_HTML_BYTES = 14 * 1024 * 1024
@@ -50,6 +50,18 @@ def collect_routes():
         js = json.dumps(data, ensure_ascii=False, separators=(',', ':')).replace('\u2028', '\\u2028').replace('\u2029', '\\u2029')
         parts.append('<script>R_ROUTES.push(%s)</script>' % safe_script(js))
     return '\n'.join(parts)
+
+
+def collect_voice():
+    """Paquete de voz pregrabado (tools/bake_voice.py) como window.R_VOICE; sin archivo, el coach usa speechSynthesis."""
+    path = os.path.join(ROOT, 'data', 'voice', 'es-mx.json')
+    if not os.path.isfile(path):
+        print('AVISO: falta data/voice/es-mx.json (python3 tools/bake_voice.py); el coach usará la voz del sistema.')
+        return ''
+    data = json.loads(read(path))
+    js = json.dumps(data, ensure_ascii=False, separators=(',', ':'))
+    print('Paquete de voz: %d clips (%.0f KB)' % (len(data.get('clips', {})), len(js) / 1024))
+    return '<script>window.R_VOICE=%s</script>\n' % safe_script(js)
 
 
 def collect_scripts():
@@ -119,7 +131,7 @@ def main():
     html = read(os.path.join(ROOT, 'src', 'index.template.html'))
     html = html.replace('<!-- @STYLES -->', collect_css())
     html = html.replace('<!-- @ROUTES -->', collect_routes())
-    html = html.replace('<!-- @SCRIPTS -->', collect_cyclist(args.cyclist) + collect_scripts())
+    html = html.replace('<!-- @SCRIPTS -->', collect_cyclist(args.cyclist) + collect_voice() + collect_scripts())
 
     problems = validate(html)
     if problems:
