@@ -20,7 +20,10 @@ for (const file of fs.readdirSync(dir).filter((f) => f.endsWith('.json'))) {
     const present = new Set();
     for (const v of d) { assert.ok(v <= 7); present.add(v); }
     assert.ok(present.size >= 2);
-    if (r.id === 'el-yeso') assert.ok(present.has(5), 'el-yeso sin agua');
+    if (r.id === 'el-yeso' || r.id === 'ch115-laguna-del-maule') assert.ok(present.has(5), r.id + ' sin agua');
+    if (['cuesta-la-dormida', 'cuesta-mallarauco', 'ch115-laguna-del-maule'].includes(r.id)) {
+      assert.ok(present.has(0) && present.has(1), r.id + ' sin roca/suelo');
+    }
     // franja de 15 m: ninguna celda cuyo centro (nodo) esté a <= 15 m del trazado puede ser árbol
     const [x0, y0, x1, y1] = r.terrain.bbox;
     const lat0 = (y0 + y1) / 2, kx = M * Math.cos(lat0 * Math.PI / 180);
