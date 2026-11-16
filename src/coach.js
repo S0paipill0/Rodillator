@@ -4,8 +4,10 @@
 (function (R) {
   'use strict';
 
-  var PRI = { COUNT: 4, POSTURE: 3, NEXT: 2, REST: 1 };
-  var DEFAULTS = { voice: true, beeps: true, volume: 0.9, verbosity: 'completo' };
+  // Prioridades: cuenta regresiva > resistencia > de pie/sentado > ataque > hidratación > resto
+  var PRI = { COUNT: 7, RESIST: 6, POSTURE: 5, ATTACK: 4, HYDRATE: 3, NEXT: 2, REST: 1 };
+  var MAX_VOLUME = 2;
+  var DEFAULTS = { voice: true, beeps: true, volume: 1.6, verbosity: 'completo', natural: true };
   var VERBOSITIES = ['completo', 'esencial', 'off'];
 
   function normalizeSettings(raw) {
@@ -14,8 +16,9 @@
     return {
       voice: r.voice === undefined ? DEFAULTS.voice : !!r.voice,
       beeps: r.beeps === undefined ? DEFAULTS.beeps : !!r.beeps,
-      volume: isFinite(v) && r.volume !== null && r.volume !== '' ? Math.min(1, Math.max(0, v)) : DEFAULTS.volume,
-      verbosity: VERBOSITIES.indexOf(r.verbosity) >= 0 ? r.verbosity : DEFAULTS.verbosity
+      volume: isFinite(v) && r.volume !== null && r.volume !== '' ? Math.min(MAX_VOLUME, Math.max(0, v)) : DEFAULTS.volume,
+      verbosity: VERBOSITIES.indexOf(r.verbosity) >= 0 ? r.verbosity : DEFAULTS.verbosity,
+      natural: r.natural === undefined ? DEFAULTS.natural : !!r.natural
     };
   }
 
@@ -68,16 +71,16 @@
     var verbosity = VERBOSITIES.indexOf(o.verbosity) >= 0 ? o.verbosity : 'completo';
 
     var fired, queue, busyUntil, prev, lastMode;
-    var wall, lastWallT, ghostSpeed;
+    var wall, lastWallT, ghostSpeed, hydrateEndT;
     function reset() {
       fired = {}; queue = []; busyUntil = 0; prev = { stepIndex: null };
       wall = { standing: false, hiSince: null, loSince: null }; lastWallT = -Infinity; ghostSpeed = null;
-      lastMode = null;
+      lastMode = null; hydrateEndT = null;
     }
     reset();
 
     function once(key) { if (fired[key]) return false; fired[key] = true; return true; }
-    function allowed(pri) { return verbosity === 'completo' || (verbosity === 'esencial' && pri >= PRI.POSTURE); }
+    function allowed(pri) { return verbosity === 'completo' || (verbosity === 'esencial' && pri >= PRI.HYDRATE); }
 
     function beep(kind) { if (verbosity !== 'off') beepFn(kind); }
     function speak(text, pri) {
@@ -202,6 +205,8 @@
       if (!s || verbosity === 'off') return;
       lastMode = s.mode || lastMode;
       if (s.paused) { flush(); return; }
+      // fin de la pausa de hidratación (el reloj es el de la rodada, así que la pausa de la rodada lo detiene)
+      if (hydrateEndT != null && s.tS >= hydrateEndT) { hydrateEndT = null; speak('Seguimos', PRI.HYDRATE); }
       if (s.mode === 'workout') workoutUpdate(s);
       else if (s.mode === 'route') routeUpdate(s);
       prev.tS = s.tS; prev.distM = s.distM;
@@ -228,6 +233,26 @@
         case 'ghostOvertook': speak('Tu mejor marca se adelanta, ¡vamos!', PRI.REST); break;
         case 'pause': queue = []; speak('Pausa', PRI.REST); break;
         case 'resume': speak('Seguimos', PRI.REST); break;
+        case 'resistance': {
+          var lv = Math.round(Number(d.level));
+          if (!isFinite(lv)) break;
+          var pv = d.prev == null ? null : Math.round(Number(d.prev));
+          if (pv == null || !isFinite(pv) || pv === lv) speak('Resistencia ' + lv, PRI.RESIST);
+          else speak((lv > pv ? 'Sube a resistencia ' : 'Baja a resistencia ') + lv, PRI.RESIST);
+          break;
+        }
+        case 'hydrate':
+          if (d.phase === 'end') { hydrateEndT = null; speak('Seguimos', PRI.HYDRATE); break; }
+          var hs = Number(d.durationS);
+          if (!(hs > 0)) break;
+          speak('Hidratación: toma agua, ' + spokenDuration(hs), PRI.HYDRATE);
+          hydrateEndT = (prev.tS != null ? prev.tS : 0) + hs; // "Seguimos" al cumplirse la duración
+          break;
+        case 'attack':
+          if (d.phase === 'start') speak('¡El pelotón ataca! Síguelos', PRI.ATTACK);
+          else if (d.phase === 'caught') speak('Bien, sigues con el grupo', PRI.ATTACK);
+          else if (d.phase === 'dropped') speak('Se te escapó el grupo, ¡vamos!', PRI.ATTACK);
+          break;
       }
       flush();
     }
@@ -264,7 +289,11 @@
     var Utter = env.SpeechSynthesisUtterance || null;
     var Ctx = env.AudioContext || env.webkitAudioContext || null;
     var nowFn = o.now || function () { return Date.now(); };
-    var st = { volume: o.volume == null ? DEFAULTS.volume : Math.min(1, Math.max(0, Number(o.volume) || 0)), voice: o.voice !== false, beeps: o.beeps !== false };
+    function clampVol(v) { return Math.min(MAX_VOLUME, Math.max(0, Number(v) || 0)); }
+    var st = { volume: o.volume == null ? DEFAULTS.volume : clampVol(o.volume), voice: o.voice !== false, beeps: o.beeps !== false, natural: o.natural !== false };
+    var pack = o.pack !== undefined ? o.pack : (env.R_VOICE || null);
+    // voz pregrabada: buffers decodificados una vez; cadena master Gain -> DynamicsCompressor -> destino
+    var buffers = {}, packState = pack && pack.clips ? 'idle' : 'none', packPromise = null, master = null, active = [], nextFree = 0;
     var ctx = null, voice = null, dog = null, speakingSince = null, disposed = false, deferred = [], deferTimer = null;
 
     function loadVoices() {
@@ -306,11 +335,77 @@
       try {
         if (!ctx && Ctx) ctx = new Ctx();
         resumeCtx();
-      } catch (e) { ctx = null; }
+        if (ctx && !master) buildChain();
+      } catch (e) { ctx = null; master = null; }
+      if (ctx && master) loadPack();
       if (synth && Utter) {
         try { var u = new Utter(' '); u.volume = 0; synth.speak(u); } catch (e) { /* nada */ }
       }
       startWatchdog();
+    }
+
+    function buildChain() {
+      try {
+        var g = ctx.createGain(), c = ctx.createDynamicsCompressor();
+        g.gain.value = st.volume;
+        c.threshold.value = -18; c.ratio.value = 4; c.knee.value = 6;
+        if (c.attack) c.attack.value = 0.003;
+        if (c.release) c.release.value = 0.25;
+        g.connect(c); c.connect(ctx.destination);
+        master = g;
+      } catch (e) { master = null; }
+    }
+
+    function b64ToBytes(b64) {
+      var bin = env.atob ? env.atob(b64) : (typeof atob === 'function' ? atob(b64) : '');
+      var u = new Uint8Array(bin.length);
+      for (var i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
+      return u.buffer;
+    }
+    function decode(key) {
+      return new Promise(function (resolve) {
+        try {
+          var ab = b64ToBytes(pack.clips[key]);
+          var done = function (buf) { if (buf) buffers[key] = buf; resolve(); };
+          var p = ctx.decodeAudioData(ab, done, function () { resolve(); });
+          if (p && p.then) p.then(done, function () { resolve(); });
+        } catch (e) { resolve(); }
+      });
+    }
+    function loadPack() {
+      if (packState !== 'idle' || !ctx || !ctx.decodeAudioData) return;
+      packState = 'loading';
+      var keys = Object.keys(pack.clips);
+      packPromise = Promise.all(keys.map(decode)).then(function () { packState = Object.keys(buffers).length ? 'ready' : 'failed'; });
+    }
+
+    // Reproduce clips pregrabados uno tras otro; false si no se puede (→ respaldo speechSynthesis)
+    function playClips(text, priority) {
+      if (!st.natural || packState !== 'ready' || !ctx || !master) return false;
+      var vp = R.voicepack;
+      if (!vp || !vp.compose) return false;
+      var keys = vp.compose(text);
+      if (!keys) return false;
+      var bufs = [];
+      for (var i = 0; i < keys.length; i++) { if (!buffers[keys[i]]) return false; bufs.push(buffers[keys[i]]); }
+      try {
+        resumeCtx();
+        var now = ctx.currentTime;
+        active = active.filter(function (a) { return a.end > now; });
+        if (priority >= PRI.COUNT && active.length) { // la cuenta regresiva corta lo que esté sonando
+          active.forEach(function (a) { try { a.src.stop(); } catch (e) { /* nada */ } });
+          active = []; nextFree = now;
+        }
+        var t = Math.max(now + 0.02, nextFree);
+        bufs.forEach(function (b) {
+          var src = ctx.createBufferSource();
+          src.buffer = b; src.connect(master); src.start(t);
+          t += b.duration + 0.03;
+          active.push({ src: src, end: t });
+        });
+        nextFree = t;
+        return true;
+      } catch (e) { return false; }
     }
 
     function flushDeferred() {
@@ -321,7 +416,9 @@
     }
 
     function say(text, sayOpts) {
-      if (disposed || !st.voice || !synth || !Utter || !text) return false;
+      if (disposed || !st.voice || !text) return false;
+      if (playClips(text, sayOpts && sayOpts.priority)) return true;
+      if (!synth || !Utter) return false;
       try {
         if (!voice) loadVoices();
         var busy = !!(synth.speaking || synth.pending);
@@ -330,7 +427,7 @@
         u.lang = voice ? voice.lang : 'es-CL';
         if (voice) u.voice = voice;
         u.rate = 1.08;
-        u.volume = st.volume;
+        u.volume = Math.min(1, st.volume); // speechSynthesis no admite más de 1.0
         u.onstart = function () { speakingSince = nowFn(); };
         u.onend = u.onerror = function () { speakingSince = null; };
         if (cancel) {
@@ -362,7 +459,7 @@
       if (disposed || !st.beeps || !ctx) return false;
       try {
         resumeCtx();
-        var t = ctx.currentTime, peak = 0.4 * st.volume;
+        var t = ctx.currentTime, peak = Math.min(0.9, 0.4 * st.volume);
         if (kind === 'tick') tone(880, t, 0.12, peak);
         else if (kind === 'go') tone(1320, t, 0.25, peak);
         else if (kind === 'end') [523.25, 659.25, 783.99].forEach(function (f) { tone(f, t, 0.3, peak * 0.7); });
@@ -373,12 +470,19 @@
 
     return {
       unlock: unlock, say: say, beep: beep,
-      setVolume: function (v) { st.volume = Math.min(1, Math.max(0, Number(v) || 0)); },
+      setVolume: function (v) { st.volume = clampVol(v); if (master) { try { master.gain.value = st.volume; } catch (e) { /* nada */ } } },
       setEnabled: function (e) {
         if (e && e.voice !== undefined) { st.voice = !!e.voice; if (!st.voice && synth) { try { synth.cancel(); } catch (x) { /* nada */ } } }
         if (e && e.beeps !== undefined) st.beeps = !!e.beeps;
+        if (e && e.natural !== undefined) st.natural = !!e.natural;
       },
-      test: function () { unlock(); beep('tick'); return say('¡Arriba! Tres, dos, uno, ¡vamos!', { priority: PRI.COUNT }); },
+      test: function () {
+        unlock(); beep('tick');
+        var phrase = '¡Arriba! Tres, dos, uno, ¡vamos!', go = function () { return say(phrase, { priority: PRI.COUNT }); };
+        // el pack se decodifica en el primer toque: se espera antes de hablar para no caer al respaldo
+        if (packState === 'loading' && packPromise) { packPromise.then(go); return true; }
+        return go();
+      },
       dispose: function () {
         disposed = true;
         if (dog && env.clearInterval) env.clearInterval(dog);
@@ -387,7 +491,7 @@
         if (deferTimer && env.clearTimeout) env.clearTimeout(deferTimer);
         deferred.length = 0;
         if (ctx && ctx.close) { try { var cp = ctx.close(); if (cp && cp.catch) cp.catch(function () {}); } catch (e) { /* nada */ } }
-        ctx = null;
+        ctx = null; master = null; active = [];
       },
       _watchdog: watchdog
     };
@@ -396,6 +500,6 @@
   R.coach = {
     PRIORITY: PRI, DEFAULTS: DEFAULTS, normalizeSettings: normalizeSettings,
     spokenDuration: spokenDuration, isStanding: isStanding, pickVoice: pickVoice,
-    createCoach: createCoach, createAudio: createAudio
+    MAX_VOLUME: MAX_VOLUME, createCoach: createCoach, createAudio: createAudio
   };
 })(typeof window !== 'undefined' ? (window.R = window.R || {}) : (globalThis.R = globalThis.R || {}));

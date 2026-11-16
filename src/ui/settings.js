@@ -218,7 +218,7 @@
         unsubs.push(function () { if (testAudio) { testAudio.dispose(); testAudio = null; } });
         function save(patch) {
           cs = Object.assign({}, cs, patch);
-          R.store.set({ settings: { coach: cs } });
+          R.store.set({ settings: { coach: Object.assign({}, cs, { volumeV2: true }) } });
         }
         function check(id, label, key) {
           return el('label', { 'class': 'row', 'for': id }, [
@@ -228,7 +228,7 @@
         }
         var volOut = el('output', { 'class': 'range-out', 'for': 'f-coach-vol' }, Math.round(cs.volume * 100) + ' %');
         var vol = el('input', {
-          id: 'f-coach-vol', type: 'range', min: 0, max: 1, step: 0.05, value: cs.volume,
+          id: 'f-coach-vol', type: 'range', min: 0, max: 2, step: 0.05, value: cs.volume,
           oninput: function (ev) { volOut.textContent = Math.round(Number(ev.target.value) * 100) + ' %'; },
           onchange: function (ev) { save({ volume: Number(ev.target.value) }); }
         });
@@ -238,18 +238,18 @@
           }));
         return section('set-coach', 'Coach de voz', 'Cuenta regresiva, avisos de intervalos y de pie o sentado mientras rodas.', [
           el('div', { 'class': 'form-grid' }, [
-            el('div', { 'class': 'field' }, [check('f-coach-voice', 'Voz del coach', 'voice'), check('f-coach-beeps', 'Pitidos', 'beeps')]),
+            el('div', { 'class': 'field' }, [check('f-coach-voice', 'Voz del coach', 'voice'), check('f-coach-natural', 'Voz natural (pregrabada)', 'natural'), check('f-coach-beeps', 'Pitidos', 'beeps')]),
             el('div', { 'class': 'field' }, [el('label', { 'for': 'f-coach-vol' }, 'Volumen'), el('div', { 'class': 'range-row' }, [vol, volOut])]),
             el('div', { 'class': 'field' }, [el('label', { 'for': 'f-coach-verb' }, 'Cuánto habla'), verb])
           ]),
           el('div', { 'class': 'row' }, el('button', {
             type: 'button', 'class': 'btn', onclick: function () {
               if (testAudio) testAudio.dispose();
-              testAudio = R.coach.createAudio({ volume: cs.volume, voice: true, beeps: cs.beeps });
+              testAudio = R.coach.createAudio({ volume: cs.volume, voice: true, beeps: cs.beeps, natural: cs.natural });
               testAudio.test();
             }
           }, 'Probar voz')),
-          el('p', { 'class': 'hint' }, 'La voz suena sobre tu música: Spotify sigue sonando y baja un momento mientras el coach habla. En iPhone usa Safari actualizado.')
+          el('p', { 'class': 'hint' }, 'La voz suena sobre tu música: Spotify sigue sonando mientras el coach habla. El volumen llega hasta 200 % con la voz natural (pregrabada); si la desactivas, la voz del teléfono no pasa de 100 %. En iPhone usa Safari actualizado.')
         ]);
       }
 

@@ -28,7 +28,7 @@ test('sin localStorage funciona solo en memoria', () => {
   assert.deepEqual(st.activities, []);
   assert.deepEqual(st.bests, {});
   assert.equal(st.schemaVersion, 1);
-  assert.deepEqual(st.settings, { reminderTime: '19:00', reminderDays: [1, 3, 5], ghostBoost: 0, botsCount: 6, units: 'metric', graphicsQuality: 'auto', lastTimed: { durationMin: 45, focus: 'auto' }, coach: { voice: true, beeps: true, volume: 0.9, verbosity: 'completo' } });
+  assert.deepEqual(st.settings, { reminderTime: '19:00', reminderDays: [1, 3, 5], ghostBoost: 0, botsCount: 6, units: 'metric', graphicsQuality: 'auto', lastTimed: { durationMin: 45, focus: 'auto' }, coach: { voice: true, beeps: true, volume: 1.6, verbosity: 'completo', natural: true, volumeV2: true } });
   S.set({ profile: { name: 'Ana' } });
   S.flush();
   assert.equal(S.get().profile.name, 'Ana');
@@ -222,9 +222,9 @@ test('settings.coach: estados guardados sin coach o con coach parcial se complet
   S.reset();
   const base = { schemaVersion: 1, settings: { botsCount: 2 } };
   S.importJSON(JSON.stringify(base));
-  assert.deepEqual(S.get().settings.coach, { voice: true, beeps: true, volume: 0.9, verbosity: 'completo' });
+  assert.deepEqual(S.get().settings.coach, { voice: true, beeps: true, volume: 1.6, verbosity: 'completo', natural: true, volumeV2: true });
   S.importJSON(JSON.stringify({ schemaVersion: 1, settings: { coach: { volume: 0.4 } } }));
-  assert.deepEqual(S.get().settings.coach, { voice: true, beeps: true, volume: 0.4, verbosity: 'completo' });
+  assert.deepEqual(S.get().settings.coach, { voice: true, beeps: true, volume: 0.4, verbosity: 'completo', natural: true, volumeV2: true });
   assert.equal(S.get().settings.botsCount, 6);
 });
 
@@ -239,4 +239,20 @@ test('graphicsQuality: default auto, normaliza valores inválidos al cargar y al
   assert.equal(S.normalizeGraphicsQuality(undefined), 'auto');
   S.importJSON(JSON.stringify({ settings: { graphicsQuality: 42 } }));
   assert.equal(S.get().settings.graphicsQuality, 'auto');
+});
+
+test('settings.coach.volume: migra 0.9 sin editar a 1.6; respeta valores editados y limita a 0..2', () => {
+  const load = (coach) => { S.reset(); S.importJSON(JSON.stringify({ schemaVersion: 1, settings: { coach } })); return S.get().settings.coach; };
+  assert.equal(load({ voice: true, volume: 0.9 }).volume, 1.6);            // estado viejo con el valor por defecto
+  assert.equal(load({ voice: true }).volume, 1.6);                         // sin volumen
+  assert.equal(load({ volume: 0.5 }).volume, 0.5);                         // editado en la escala vieja
+  assert.equal(load({ volume: 0.9, volumeV2: true }).volume, 0.9);         // ya migrado: 90 % elegido por el usuario
+  assert.equal(load({ volume: 1.8, volumeV2: true }).volume, 1.8);
+  assert.equal(load({ volume: 7, volumeV2: true }).volume, 2);
+  assert.equal(load({ volume: -1, volumeV2: true }).volume, 0);
+  assert.equal(load({ volume: 'x', volumeV2: true }).volume, 1.6);
+  assert.equal(load({ volume: 0.5 }).volumeV2, true);
+  assert.equal(load({ natural: false }).natural, false);
+  S.reset(); S.set({ settings: { coach: { voice: true, beeps: true, volume: 9, verbosity: 'completo', natural: true, volumeV2: true } } });
+  assert.equal(S.get().settings.coach.volume, 2);
 });
