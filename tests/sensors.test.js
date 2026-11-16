@@ -151,9 +151,10 @@ test('connectSpeedCadence: emite data, status y reconecta con 3 reintentos', asy
 // ---- Normalización ----
 test('normalize: valores por defecto', () => {
   const n = SS.normalize({});
-  assert.deepStrictEqual(n.trainer, { type: 'mecanico-8', wheelCircMm: 2070, flatLevel: 3, powerScale: 1 });
+  assert.deepStrictEqual(n.trainer, { type: 'mecanico-8', wheelCircMm: 2050, flatLevel: 3, powerScale: 1 });
   assert.deepStrictEqual(n.sensors, { lastSpeedId: null, lastHrId: null });
-  assert.deepStrictEqual(SS.normalize(undefined).trainer.wheelCircMm, 2070);
+  assert.deepStrictEqual(SS.normalize(undefined).trainer.wheelCircMm, 2050);
+  assert.strictEqual(SS.presetFor(SS.normalize({}).trainer.wheelCircMm), '26x1.95');
 });
 
 test('normalize: recorta, redondea y descarta basura; conserva otras claves', () => {
@@ -164,7 +165,7 @@ test('normalize: recorta, redondea y descarta basura; conserva otras claves', ()
   assert.deepStrictEqual(n.sensors, { lastSpeedId: null, lastHrId: 'abc' });
   assert.strictEqual(input.trainer.flatLevel, 11, 'no muta la entrada');
   assert.strictEqual(SS.normalizeTrainer({ powerScale: 0.1 }).powerScale, 0.7);
-  assert.strictEqual(SS.normalizeTrainer({ powerScale: 'x', wheelCircMm: 'x', flatLevel: null }).wheelCircMm, 2070);
+  assert.strictEqual(SS.normalizeTrainer({ powerScale: 'x', wheelCircMm: 'x', flatLevel: null }).wheelCircMm, 2050);
   assert.strictEqual(SS.normalizeTrainer({ wheelCircMm: 50 }).wheelCircMm, 1000);
   assert.strictEqual(SS.normalizeTrainer({ flatLevel: 0 }).flatLevel, 1);
   assert.strictEqual(SS.normalizeTrainer({ trainer: 1 }).powerScale, 1);

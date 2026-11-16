@@ -2,7 +2,7 @@
   'use strict';
 
   var MSG_NO_BT = 'Tu navegador o esta vista no permite Bluetooth. Abre la versión web de Rodillator en Chrome (Android o computador).';
-  var MSG_WATCH = 'Reloj Xiaomi Watch S3: no está confirmado que transmita el pulso por Bluetooth. Busca en el reloj o en la app Mi Fitness una opción del tipo "Transmitir frecuencia cardíaca". Si no existe, usa una banda de pecho Bluetooth.';
+  var MSG_WATCH = 'Para el pulso en vivo usa una banda de pecho Bluetooth (estándar Heart Rate, servicio 0x180D), por ejemplo la de Decathlon. El Xiaomi Watch S3 no transmite el pulso en vivo; el pulso del reloj podrá importarse después desde Strava.';
   var STATE_TEXT = { connected: 'Conectado', reconnecting: 'Reconectando…', disconnected: 'Sin conectar' };
 
   function fallbackEl(tag, attrs, children) {

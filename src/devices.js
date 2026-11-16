@@ -6,7 +6,7 @@
   var HEART_RATE = 0x180D, HEART_RATE_MEASUREMENT = 0x2A37;
   var CSC = 0x1816, CSC_MEASUREMENT = 0x2A5B;
   var BATTERY = 0x180F, BATTERY_LEVEL = 0x2A19;
-  var DEFAULT_WHEEL_MM = 2070;
+  var DEFAULT_WHEEL_MM = 2050;
   var CSC_IDLE_MS = 3000;   // sin eventos de rueda/biela durante 3 s => velocidad/cadencia 0
 
   var MSG_BLOCKED = 'El navegador bloqueó Bluetooth en esta vista. Abre Rodillator en una pestaña de Chrome o Edge.';

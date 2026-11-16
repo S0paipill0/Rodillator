@@ -2,9 +2,9 @@
   'use strict';
 
   // Normaliza settings.trainer y settings.sensors (contrato de la ola R2).
-  //   trainer = { type: 'mecanico-8', wheelCircMm: 2070, flatLevel: 3, powerScale: 1.0 }
+  //   trainer = { type: 'mecanico-8', wheelCircMm: 2050, flatLevel: 3, powerScale: 1.0 }
   //   sensors = { lastSpeedId: string|null, lastHrId: string|null }
-  var DEFAULT_TRAINER = { type: 'mecanico-8', wheelCircMm: 2070, flatLevel: 3, powerScale: 1 };
+  var DEFAULT_TRAINER = { type: 'mecanico-8', wheelCircMm: 2050, flatLevel: 3, powerScale: 1 };
   var WHEEL_MIN = 1000, WHEEL_MAX = 3000;
   var SCALE_MIN = 0.7, SCALE_MAX = 1.3;
   var LEVELS = 8;
