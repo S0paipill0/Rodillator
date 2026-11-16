@@ -147,3 +147,75 @@ test('bots son compatibles con el contrato de rider para la escena', () => {
   const p = R.riders.createPeloton({ count: 10, ftp: 250, massKg: 80, route, seed: 1 });
   p.bots.forEach((b) => { assert.strictEqual(b.kind, 'bot'); assert.ok(b.id && b.name && b.color); assert.strictEqual(typeof b.distM, 'number'); });
 });
+
+// ---- ronda 1: el elástico es un objetivo de velocidad; comportamiento independiente de dt ----
+const talagante = require('../data/routes/talagante-valle.json');
+
+function simDt({ rt, dt, seed = 5, seconds = 1800, userMode = 'const' }) {
+  const p = R.riders.createPeloton({ count: 14, ftp: 250, massKg: 80, route: rt, seed });
+  let ud = 0, uv = 0, lastEnd = -1e9, worst = null, maxMeanErr = 0, attacks = 0, vmin = Infinity, vmax = 0;
+  const n = Math.round(seconds / dt);
+  for (let i = 0; i < n; i++) {
+    const t = i * dt;
+    if (userMode === 'const') uv = 30 / 3.6;
+    else { const s = R.routes.sampleAt(rt, ud); uv = R.physics.step({ v: uv, powerW: 200, gradePct: s.gradePct, massKg: 80, altitudeM: s.ele, dt }); }
+    ud = Math.min(rt.distanceM, ud + uv * dt);
+    const was = p.state.attacking;
+    p.update(dt, t, ud);
+    if (!was && p.state.attacking) attacks++;
+    if (p.state.phase === 'end') lastEnd = t;
+    if (t > 30) {
+      p.bots.forEach((b) => {
+        vmin = Math.min(vmin, b.speedMps); vmax = Math.max(vmax, b.speedMps);
+        if (b.speedMps < 0.4 * uv - 1 || b.speedMps > 1.8 * uv + 1) worst = worst || { t, id: b.id, v: b.speedMps, uv };
+      });
+    }
+    // entre ataques (tras 150 s de reagrupamiento) la media del grupo principal va a ±60 m del usuario
+    if (t > 60 && !p.state.attacking && t - lastEnd > 150) {
+      const m = p.bots.filter((b) => b.group === 'principal');
+      maxMeanErr = Math.max(maxMeanErr, Math.abs(m.reduce((a, b) => a + b.distM, 0) / m.length - ud));
+    }
+  }
+  return { worst, maxMeanErr, attacks, vmin, vmax };
+}
+
+[['sintética 60 km', makeRoute(60000), 'const'], ['talagante-valle', talagante, 'power']].forEach(([name, rt, mode]) => {
+  test('dt=1/60 durante 30 min (' + name + '): bots entre 0,4× y 1,8× la velocidad del usuario, grupo cerca', () => {
+    const r = simDt({ rt, dt: 1 / 60, userMode: mode });
+    assert.strictEqual(r.worst, null, JSON.stringify(r.worst));
+    assert.ok(r.maxMeanErr <= 60, 'error medio ' + r.maxMeanErr);
+    assert.ok(r.attacks >= 2, 'ataques ' + r.attacks);
+  });
+});
+
+test('mismo comportamiento con dt=1 y dt=1/60', () => {
+  const a = simDt({ rt: makeRoute(60000), dt: 1 }), b = simDt({ rt: makeRoute(60000), dt: 1 / 60 });
+  assert.strictEqual(a.worst, null);
+  assert.strictEqual(a.attacks, b.attacks);
+  assert.ok(Math.abs(a.vmax - b.vmax) < 1, a.vmax + ' vs ' + b.vmax);
+  assert.ok(Math.abs(a.vmin - b.vmin) < 1, a.vmin + ' vs ' + b.vmin);
+});
+
+test('bot.powerW refleja la potencia ×boost durante el ataque', () => {
+  const p = R.riders.createPeloton({ count: 14, ftp: 250, massKg: 80, route, seed: 5 });
+  let ud = 0, checked = 0;
+  for (let t = 0; t < 1500; t++) {
+    ud += 30 / 3.6; p.update(1, t, ud);
+    if (p.state.attacking) {
+      p.bots.filter((b) => b.group === 'principal').forEach((b) => {
+        // potencia libre máx. 1,15·FTP; con boost ≥ 1,22 la efectiva supera el tope libre en algún bot
+        assert.ok(b.powerW >= 0.75 * 250 * 1.22 - 1e-6, 'powerW ' + b.powerW);
+      });
+      checked++;
+    }
+  }
+  assert.ok(checked > 0);
+});
+
+test('colocación inicial con el usuario en 0: sin bots apilados en distM = 0', () => {
+  const p = R.riders.createPeloton({ count: 20, ftp: 250, massKg: 80, route, seed: 3 });
+  p.update(1 / 60, 0, 0);
+  const ds = p.bots.map((b) => b.distM).sort((a, b) => a - b);
+  for (let i = 1; i < ds.length; i++) assert.ok(ds[i] - ds[i - 1] >= 2 - 0.2, 'separación ' + (ds[i] - ds[i - 1]));
+  assert.ok(ds.every((d) => d >= 0));
+});

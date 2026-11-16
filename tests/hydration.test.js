@@ -119,3 +119,25 @@ test('partir un paso suave con rampa interpola la potencia', () => {
   assert.strictEqual(w.steps[i - 1].powerPctEnd, w.steps[i + 1].powerPct);
   assert.ok(Math.abs(w.steps[i + 1].powerPct - 62) < 1e-9); // 50 + 30·720/1800
 });
+
+test('withHydration es idempotente (no duplica pausas)', () => {
+  const w1 = T.withHydration(T.getWorkout('sweetspot-3x12'), { everyMin: 12 });
+  const w2 = T.withHydration(w1, { everyMin: 12 });
+  assert.strictEqual(w2.steps.filter((s) => s.hydrate).length, w1.steps.filter((s) => s.hydrate).length);
+  assert.strictEqual(w2.durationS, w1.durationS);
+  assert.strictEqual(w2.hydration.count, w1.hydration.count);
+});
+
+test('series on/off cortas: la pausa va tras la recuperación corta, no pegada al esfuerzo', () => {
+  const steps = [{ durationS: 600, powerPct: 60 }];
+  for (let i = 0; i < 20; i++) steps.push({ durationS: 40, powerPct: 120 }, { durationS: 20, powerPct: 50 });
+  steps.push({ durationS: 600, powerPct: 55 });
+  const orig = { id: 'onoff', name: 'On/off', category: 'vo2', steps, durationS: steps.reduce((a, s) => a + s.durationS, 0) };
+  const w = T.withHydration(orig, { everyMin: 12 });
+  const { pauses } = analyze(orig, w);
+  assert.ok(pauses.length >= 1);
+  pauses.forEach((p) => {
+    if (inten(p.next)) assert.ok(!inten(p.prev) && p.prev.durationS === 20 && w.steps[p.idx - 2].powerPct === 120);
+  });
+  assert.ok(pauses.some((p) => inten(p.next)), 'alguna pausa cae dentro de la serie');
+});

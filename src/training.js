@@ -869,6 +869,7 @@
   const HYD_INTENSE_PCT = 88;   // desde sweet spot hacia arriba un paso es "intenso" y no se corta
   const HYD_MIN_START_S = 8 * 60; // no insertar en los primeros 8 min
   const HYD_MIN_END_S = 5 * 60;   // ni en los últimos 5 min (del entrenamiento original)
+  const HYD_SHORT_SOFT_S = 180;  // recuperación "corta" de una serie on/off (< 3 min)
   const HYD_MIN_FRAGMENT_S = 30;  // al partir un paso suave, cada trozo dura al menos esto
   const stepIntensity = (s) => Math.max(s.powerPct, s.powerPctEnd != null ? s.powerPctEnd : s.powerPct);
 
@@ -883,6 +884,11 @@
     const pauseS = Math.round(isFinite(opts.durationS) && opts.durationS > 0 ? clamp(opts.durationS, 15, 120) : 45);
     const everyS = everyMin * 60;
     const src = workout.steps.map((s) => Object.assign({}, s));
+    // idempotente: si ya trae pausas de hidratación no se agregan otras
+    if (src.some((s) => s.hydrate)) {
+      const n = src.filter((s) => s.hydrate).length;
+      return Object.assign({}, workout, { steps: src, hydration: workout.hydration || { everyMin: everyMin, durationS: pauseS, count: n } });
+    }
     const T = sumDur(src);
     const pause = () => ({ durationS: pauseS, powerPct: 50, label: 'Hidratación', hydrate: true });
     const out = [];
@@ -891,12 +897,17 @@
       let due = Math.max(everyS, HYD_MIN_START_S), pending = false, done = false, t = 0;
       const valid = (p) => p >= HYD_MIN_START_S && p <= T - HYD_MIN_END_S;
       const insertAt = (p) => { out.push(pause()); count++; due = p + everyS; pending = false; };
-      src.forEach((step) => {
+      src.forEach((step, idx) => {
         const a = t, b = t + step.durationS;
         t = b;
         if (done) { out.push(step); return; }
         const soft = stepIntensity(step) < HYD_INTENSE_PCT;
         if (pending || due <= a) {
+          const nxt = src[idx + 1];
+          if (soft && step.durationS < HYD_SHORT_SOFT_S && nxt && stepIntensity(nxt) >= HYD_INTENSE_PCT && valid(b)) {
+            // series on/off cortas: la pausa va tras la recuperación corta, no justo después del esfuerzo
+            out.push(step); insertAt(b); return;
+          }
           if (soft) {
             if (a > T - HYD_MIN_END_S) done = true; else if (valid(a)) insertAt(a); else pending = true;
           } else pending = true;

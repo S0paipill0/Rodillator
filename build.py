@@ -10,7 +10,7 @@ import sys
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 SCRIPT_ORDER = [
-    'store', 'training', 'physics', 'routes', 'riders', 'vendor/gltfloader', 'cyclist', 'scene3d', 'devices', 'integrations', 'coach',
+    'store', 'training', 'physics', 'trainer', 'routes', 'riders', 'vendor/gltfloader', 'cyclist', 'scene3d', 'devices', 'integrations', 'coach',
     'ui/shell', 'ui/onboarding', 'ui/plan', 'ui/routes', 'ui/settings', 'ui/ride', 'ui/stats', 'app',
 ]
 MAX_HTML_BYTES = 14 * 1024 * 1024

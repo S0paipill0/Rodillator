@@ -72,6 +72,8 @@ test('levelForTarget: menor cadencia exige nivel más alto para la misma potenci
 test('levelForTarget: sin objetivo usa ftp o nivel de llano', () => {
   assert.strictEqual(T.levelForTarget({ ftp: 250 }), T.levelForTarget({ targetW: 250 }));
   assert.strictEqual(T.levelForTarget({}), 3);
+  assert.strictEqual(T.levelForTarget({ targetW: 0 }), 1);
+  assert.strictEqual(T.levelForTarget({ targetW: 0, ftp: 250 }), 1);
 });
 
 test('virtualGradePct coherente con levelForGrade', () => {

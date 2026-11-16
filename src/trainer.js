@@ -86,6 +86,8 @@
   // (por defecto 2070 mm, aro 26): v = rpm · (50/17) · circunferencia. A 90 rpm ≈ 32,9 km/h.
   function levelForTarget(o) {
     o = o || {};
+    // objetivo explícito <= 0 (p. ej. pausa o soltar piernas): el nivel más suave
+    if (o.targetW != null && o.targetW !== '' && isFinite(Number(o.targetW)) && Number(o.targetW) <= 0) return 1;
     let target = Number(o.targetW);
     if (!(target > 0)) target = Number(o.ftp) > 0 ? Number(o.ftp) : NaN;
     if (!(target > 0)) return FLAT_LEVEL;

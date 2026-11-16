@@ -94,7 +94,9 @@
 
   // ---------- pelotón con ataques ----------
   const RANK = { tranquilo: 0, constante: 1, atacante: 2, fuerte: 3 };
-  const PEL_ELASTIC_GAIN = 0.1;   // (m/s de ajuste) por metro de error de posición
+  const PEL_ELASTIC_GAIN = 0.04;  // s⁻¹: m/s de ajuste de velocidad por metro de error de posición
+  const PEL_ELASTIC_LIM_FRAC = 0.3, PEL_ELASTIC_LIM_ABS = 1.5; // tope del ajuste: ±(0,3·v_usuario + 1,5) m/s
+  const PEL_MIN_SPACING_M = 2;    // separación mínima en la colocación inicial
   const PEL_MAX_ACCEL = 1.5;      // m/s² máximo de cambio de velocidad de un bot (sin saltos visibles)
   const PEL_MIN_ATTACK_START_S = 240;  // sin ataques en los primeros 4 min
   const PEL_NO_ATTACK_LAST_M = 2000;   // ni en los últimos 2 km de la ruta
@@ -168,25 +170,42 @@
       }
       const attackingNow = state.attacking;
 
+      if (first) { // colocación inicial (antes de que se vea el pelotón)
+        // los puestos que caerían detrás de la largada (distM < 0) se reparten hacia delante,
+        // con al menos PEL_MIN_SPACING_M entre bots, para no apilarlos en distM = 0
+        const placed = bots.map((bot) => {
+          const c = cfg.get(bot.id);
+          const target = ud + c.off + c.wobA * Math.sin((2 * Math.PI * tS) / c.wobP + c.wobPh);
+          return { bot, d: Math.min(end, Math.max(0, target)) };
+        }).sort((a, b) => a.d - b.d);
+        for (let k = 1; k < placed.length; k++) {
+          if (placed[k].d < placed[k - 1].d + PEL_MIN_SPACING_M) placed[k].d = Math.min(end, placed[k - 1].d + PEL_MIN_SPACING_M);
+        }
+        placed.forEach((o) => { o.bot.distM = o.d; o.bot.speedMps = Math.max(0, userSpeed); });
+      }
+
       bots.forEach((bot) => {
         const c = cfg.get(bot.id);
         const target = ud + c.off + c.wobA * Math.sin((2 * Math.PI * tS) / c.wobP + c.wobPh);
-        if (first) { // colocación inicial (antes de que se vea el pelotón)
-          bot.distM = Math.min(end, Math.max(0, target));
-          bot.speedMps = Math.max(0, userSpeed);
-        }
         const prevD = bot.distM, prevV = bot.speedMps;
-        bot.update(dt, tS); // calcula bot.powerW (y avanza); lo recalculamos con la potencia del pelotón
-        if (prevD >= end) { bot.distM = end; bot.speedMps = 0; return; }
-        const mult = attackingNow && bot.group === 'principal' ? boost + c.jitter : 1;
-        const s = R.routes.sampleAt(route, prevD);
-        let v = R.physics.step({ v: prevV, powerW: bot.powerW * mult, gradePct: s.gradePct, massKg: massKg, altitudeM: s.ele, dt });
-        v *= 1 + c.boost;
-        if (!(attackingNow && bot.group === 'principal')) {
-          const lim = 0.5 * v + 2;
-          v = Math.max(0, v + Math.min(lim, Math.max(-lim, PEL_ELASTIC_GAIN * (target - prevD))));
+        bot.update(dt, tS); // calcula la potencia "libre" del bot en bot.powerW (la posición se recalcula abajo)
+        if (prevD >= end) { bot.distM = end; bot.speedMps = 0; bot.powerW = 0; return; }
+        const attacker = attackingNow && bot.group === 'principal';
+        const mult = attacker ? boost + c.jitter : 1;
+        bot.powerW *= mult; // potencia efectiva (coherente para HUD/coach durante el ataque)
+        let vCmd;
+        if (attacker) {
+          // el grupo atacante rueda libre con su potencia ×boost (física)
+          const s = R.routes.sampleAt(route, prevD);
+          vCmd = R.physics.step({ v: prevV, powerW: bot.powerW, gradePct: s.gradePct, massKg: massKg, altitudeM: s.ele, dt });
+        } else {
+          // objetivo de velocidad (no aceleración): ritmo del usuario + corrección proporcional al error
+          // de posición, acotada. Es un sistema de primer orden (constante de tiempo 1/G), estable e
+          // independiente de dt.
+          const lim = PEL_ELASTIC_LIM_FRAC * userSpeed + PEL_ELASTIC_LIM_ABS;
+          vCmd = Math.max(0, userSpeed * (1 + c.boost) + Math.min(lim, Math.max(-lim, PEL_ELASTIC_GAIN * (target - prevD))));
         }
-        v = prevV + Math.min(PEL_MAX_ACCEL * dt, Math.max(-PEL_MAX_ACCEL * dt, v - prevV));
+        const v = Math.max(0, prevV + Math.min(PEL_MAX_ACCEL * dt, Math.max(-PEL_MAX_ACCEL * dt, vCmd - prevV)));
         bot.distM = Math.min(end, Math.max(0, prevD + ((prevV + v) / 2) * dt));
         bot.speedMps = v;
       });
