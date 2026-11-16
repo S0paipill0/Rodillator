@@ -111,16 +111,18 @@ ROUTES = [
          # inicio: crono-escalada de Peñaflor (bikeclimbs); luego la ruta G-380 por el canal (-70.9395) y el camino que se ve
          # en la imagen hasta el portezuelo (644 m en el DEM)
          waypoints=[(-33.6081, -70.9006), (-33.6105, -70.9200), (-33.6133, -70.9395), (-33.6155, -70.9614)],
+         # p95 de pendiente local = 15,5 % (tope 16 %): la ruta no se tocó; el margen viene de umbrales 9/13/18 % y ventana de
+         # elevación de 27 puntos (540 m); la cuesta real llega a 27 %, por eso el p95 sintético es alto.
          slopes=(0.09, 0.13, 0.18), window_pts=27, grid_m=20,
          description="Subida de la Cuesta Mallarauco desde Peñaflor por la ruta G-380 hasta la cumbre (~645 m), "
                      "clásica de entrenamiento de los ciclistas de Talagante y Peñaflor. "
                      "El trazado es aproximado, generado sobre el relieve real."),
-    dict(id="ch115-laguna-del-maule", name="CH-115 Los Cóndores – Laguna del Maule", region="Maule", country="Chile",
+    dict(id="ch115-laguna-del-maule", name="CH-115 a Laguna del Maule (desde Retén La Mina)", region="Maule", country="Chile",
          synthetic=True,
          waypoints=[(-35.8239, -70.7946), (-36.0180, -70.5660)], grid_m=30, climb=True,
-         description="Ruta 115-CH (Paso Pehuenche) por el valle alto del Maule: parte en el Retén La Mina / Termas El "
-                     "Médano (~920 m), pasa por el Salto del Maule y el Valle de los Cóndores, donde está la central "
-                     "Los Cóndores, y sube hasta el sector de la Laguna del Maule (~2.200 m). "
+         description="Ruta 115-CH (Paso Pehuenche) por el valle alto del Maule. Parte en el Retén La Mina / Termas El "
+                     "Médano (~920 m), río abajo de Los Cóndores, pasa por el Salto del Maule y el Valle de los Cóndores "
+                     "(central Los Cóndores) y sube hasta el sector de la Laguna del Maule (~2.200 m). "
                      "El trazado es aproximado, generado sobre el relieve real."),
 ]
 

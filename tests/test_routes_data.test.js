@@ -169,3 +169,29 @@ for (const id of Object.keys(EXPECTED)) {
     assert.ok(Math.abs(w / ph / aspectBbox - 1) < 0.02, `aspecto de textura ${w / ph} vs bbox ${aspectBbox}`);
   });
 }
+
+// El JSON debe ser reproducible desde tools/bake_routes.py: name y description coinciden con la entrada de ROUTES.
+test('name y description de cada JSON coinciden con ROUTES en tools/bake_routes.py', () => {
+  const { spawnSync } = require('node:child_process');
+  const code = [
+    'import ast,json,sys',
+    't=ast.parse(open(sys.argv[1],encoding="utf-8").read())',
+    'out={}',
+    'for n in ast.walk(t):',
+    '    if isinstance(n,ast.Assign) and getattr(n.targets[0],"id","")=="ROUTES":',
+    '        for d in n.value.elts:',
+    '            kw={k.arg:ast.literal_eval(k.value) for k in d.keywords if k.arg in ("id","name","description")}',
+    '            out[kw["id"]]=kw',
+    'print(json.dumps(out))',
+  ].join('\n');
+  const res = spawnSync('python3', ['-I', '-c', code, path.join(__dirname, '..', 'tools', 'bake_routes.py')], { encoding: 'utf8' });
+  if (res.error || res.status !== 0) { throw new Error('no se pudo leer ROUTES: ' + (res.error || res.stderr)); }
+  const routes = JSON.parse(res.stdout);
+  assert.deepStrictEqual(Object.keys(routes).sort(), Object.keys(EXPECTED).sort());
+  for (const id of Object.keys(routes)) {
+    const { json } = load(id);
+    assert.strictEqual(json.name, routes[id].name, id + ' name');
+    assert.strictEqual(json.description, routes[id].description, id + ' description');
+  }
+  assert.strictEqual(load('ch115-laguna-del-maule').json.name, 'CH-115 a Laguna del Maule (desde Retén La Mina)');
+});
