@@ -17,6 +17,13 @@ const EXPECTED = {
   'caracoles-portillo': { slope: [5, 8], synthetic: true, p95Max: 18 },
   'el-yeso': { slope: [3, 6], synthetic: true },
   'talagante-valle': { slope: [0, 1.5], km: [30, 36], synthetic: true },
+  // Tarea 18. Rangos = referencia pública +/- 15 % (bikeclimbs / PJAMM), ver informe.
+  // La Dormida lado Tiltil: 8,76 km, +593 m, 6,8 %, cima 1.275 m, base 676 m.
+  'cuesta-la-dormida': { slope: [5.8, 7.8], km: [7.45, 10.1], gain: [504, 682], maxEle: [1200, 1290], synthetic: true },
+  // Mallarauco desde Peñaflor: 7,6 km, +280 m, 3,7 %, cumbre ~658 m. p95 local <= 16 % (la cuesta real llega a 27 %).
+  'cuesta-mallarauco': { slope: [3.15, 4.25], km: [6.46, 8.73], gain: [238, 322], maxEle: [600, 670], synthetic: true, p95Max: 16 },
+  // CH-115 hasta la Laguna del Maule: tramo <= 45 km (la referencia PJAMM, 60,7 km al 2,6 %, no cabe en el JSON).
+  'ch115-laguna-del-maule': { slope: [3.0, 4.0], km: [30, 45], gain: [1100, 1700], maxEle: [2100, 2300], maxBytes: 1.8e6, synthetic: true },
 };
 
 function load(id) {
@@ -47,7 +54,7 @@ function jpegSize(buf) {
   throw new Error('JPEG sin marcador SOF');
 }
 
-test('existen exactamente las 5 rutas esperadas', () => {
+test('existen exactamente las 8 rutas esperadas', () => {
   const ids = fs.readdirSync(DIR).filter((f) => f.endsWith('.json')).map((f) => f.slice(0, -5)).sort();
   assert.deepStrictEqual(ids, Object.keys(EXPECTED).sort());
 });
@@ -64,7 +71,8 @@ for (const id of Object.keys(EXPECTED)) {
     if (exp.synthetic) assert.match(r.description, /aproximado/);
     else assert.match(r.source, /rayshaderanimate/);
     for (const k of ['distanceM', 'gainM', 'maxEleM', 'minEleM']) assert.ok(Number.isFinite(r[k]), k);
-    assert.ok(bytes < 1.6e6, `JSON de ${bytes} bytes supera 1.6 MB`);
+    const maxBytes = exp.maxBytes || 1.6e6;
+    assert.ok(bytes < maxBytes, `JSON de ${bytes} bytes supera ${maxBytes}`);
   });
 
   test(`${id}: points (distM creciente, paso ~20 m, agregados coherentes)`, () => {
@@ -93,6 +101,8 @@ for (const id of Object.keys(EXPECTED)) {
     const s = meanSlopePct(r);
     assert.ok(s >= exp.slope[0] && s <= exp.slope[1], `pendiente media ${s.toFixed(2)} % fuera de ${exp.slope}`);
     if (exp.km) assert.ok(r.distanceM / 1000 >= exp.km[0] && r.distanceM / 1000 <= exp.km[1], `distancia ${r.distanceM}`);
+    if (exp.gain) assert.ok(r.gainM >= exp.gain[0] && r.gainM <= exp.gain[1], `desnivel ${r.gainM} fuera de ${exp.gain}`);
+    if (exp.maxEle) assert.ok(r.maxEleM >= exp.maxEle[0] && r.maxEleM <= exp.maxEle[1], `cota máxima ${r.maxEleM} fuera de ${exp.maxEle}`);
   });
 
   if (exp.synthetic) {
