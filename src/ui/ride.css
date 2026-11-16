@@ -34,6 +34,14 @@
 .rd-tabs { display: flex; gap: 4px; background: rgba(255, 255, 255, .05); padding: 4px; border-radius: 12px; margin-bottom: 16px; overflow-x: auto; }
 .rd-tab { flex: 1 0 auto; border: 0; background: transparent; padding: 10px 16px; border-radius: 9px; font-weight: 600; font-size: 15px; color: var(--rd-muted); white-space: nowrap; }
 .rd-tab.is-on { background: var(--rd-accent); color: #170A04; }
+.rd-seg { max-width: 360px; margin-bottom: 14px; }
+.rd-seg .rd-tab { flex: 1 1 0; text-align: center; }
+.rd-chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.rd-chip { min-height: 44px; padding: 8px 16px; border-radius: 999px; border: 1px solid var(--rd-line); background: rgba(255, 255, 255, .05); font-weight: 600; font-size: 15px; color: var(--rd-text); }
+.rd-chip.is-on { background: var(--rd-accent); border-color: var(--rd-accent); color: #170A04; }
+.rd-h--sub { margin-top: 18px; }
+@media (max-width: 600px) { .rd-chips { gap: 6px; } .rd-chip { min-height: 40px; padding: 6px 12px; font-size: 14px; } .rd-h--sub { margin-top: 12px; } }
+.rd-input--short { max-width: 140px; }
 .rd-select, .rd-input { width: 100%; max-width: 420px; background: #121A22; color: var(--rd-text); border: 1px solid var(--rd-line); border-radius: 10px; padding: 11px 12px; font: inherit; font-size: 15px; }
 .rd-wk-name { font-family: var(--rd-num); font-weight: 800; font-size: 30px; line-height: 1.05; }
 .rd-wk-meta { color: var(--rd-muted); font-size: 14px; margin: 6px 0 4px; }

@@ -217,3 +217,14 @@ test('createDoubleTap.reset descarta el toque pendiente (multitoque)', () => {
   d.reset();
   assert.equal(d.tap(1100, 10, 10), false);
 });
+
+test('timedChoice normaliza duración y enfoque; buildActivity guarda la copia del workout generado', () => {
+  assert.deepEqual(L.timedChoice(undefined), { durationMin: 45, focus: 'auto' });
+  assert.deepEqual(L.timedChoice({ durationMin: 500, focus: 'xx' }), { durationMin: 150, focus: 'auto' });
+  assert.deepEqual(L.timedChoice({ durationMin: 30, focus: 'hoy' }), { durationMin: 30, focus: 'hoy' });
+  const s = L.createSampler();
+  for (let i = 0; i < 12; i++) s.advance(i, { powerW: 150, distM: i * 8 });
+  const w = { id: 'tiempo-vo2-30-20261116', name: 'x', category: 'vo2', durationS: 1800, tss: 30, steps: [] };
+  assert.deepEqual(L.buildActivity({ type: 'workout', name: 'x', workoutId: w.id, samples: s.samples, ftp: 200, workout: w }).workout, w);
+  assert.equal('workout' in L.buildActivity({ type: 'workout', name: 'x', samples: s.samples, ftp: 200 }), false);
+});

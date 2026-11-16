@@ -374,6 +374,18 @@
           el('button', { type: 'button', 'class': 'btn btn-primary', onclick: function () { ctx.navigate('rodar', { workoutId: todayW.id }); } }, isDone ? 'Rodar otra vez' : 'Rodar'),
           el('button', { type: 'button', 'class': 'btn', onclick: function () { ctx.navigate('plan'); } }, 'Ver plan')
         ]));
+        // poco tiempo: versión corta de la sesión de hoy
+        var quick = [20, 30, 45].filter(function (m) { return m * 60 < todayW.durationS; });
+        if (!isDone && quick.length) {
+          card.appendChild(el('div', { 'class': 'row quick-time', role: 'group', 'aria-label': '¿Poco tiempo? Hazla en…' }, [
+            el('span', { 'class': 'quick-label' }, '¿Poco tiempo? Hazla en…')
+          ].concat(quick.map(function (m) {
+            return el('button', {
+              type: 'button', 'class': 'btn btn-sm', 'aria-label': 'Hacer la sesión de hoy en ' + m + ' minutos',
+              onclick: function () { ctx.navigate('rodar', { timed: { durationMin: m, focus: 'hoy' } }); }
+            }, m + ' min');
+          }))));
+        }
       } else {
         var next = days.filter(function (d) { return d.date > today && d.workoutId && d.status === 'pendiente'; })[0];
         var nextW = next ? R.training.getWorkout(next.workoutId) : null;

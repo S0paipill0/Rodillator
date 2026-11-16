@@ -203,7 +203,7 @@
     const hrs = samples.filter((s) => s[2] != null && s[2] > 0).map((s) => s[2]);
     const cads = samples.filter((s) => s[3] != null && s[3] > 0).map((s) => s[3]);
     const last = samples[samples.length - 1];
-    return {
+    const act = {
       id: o.id || ('act-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6)),
       date: o.date || new Date().toISOString(),
       type: o.type, name: o.name,
@@ -217,6 +217,16 @@
       samples: samples,
       bestEfforts: m.bestEfforts,
     };
+    if (o.workout) act.workout = o.workout; // copia compacta de una sesión generada (por tiempo)
+    return act;
+  }
+
+  // Elección de "entrenar por tiempo": duración entera 15-150 y enfoque conocido.
+  const TIMED_FOCUS_IDS = ['hoy', 'recuperacion', 'resistencia', 'tempo', 'sweetspot', 'umbral', 'vo2', 'sprints', 'sorpresa', 'auto'];
+  function timedChoice(v) {
+    const o = v || {};
+    const m = Math.round(Number(o.durationMin));
+    return { durationMin: isFinite(m) && m > 0 ? clamp(m, 15, 150) : 45, focus: TIMED_FOCUS_IDS.indexOf(o.focus) >= 0 ? o.focus : 'auto' };
   }
 
   function gradeArrow(g) { return g > 1 ? '↗' : g < -1 ? '↘' : '→'; }
@@ -272,7 +282,7 @@
   R.rideLogic = {
     positionPill, computeViewInsets, createDoubleTap,
     fmtTime, fmtGap, fmtKm, ymd, ghostTimeAt, ghostGapS, ghostSpeed, createSampler, createEventDetector,
-    windowAround, zoneSeconds, buildActivity, gradeArrow, pickTodayWorkout,
+    windowAround, zoneSeconds, buildActivity, timedChoice, gradeArrow, pickTodayWorkout,
     RPE_SCALE, CAMERAS, durText, clamp,
   };
 
@@ -450,7 +460,10 @@
     // Preparación
     // ======================================================================
     const cfg = {
-      tab: params.workoutId ? 'workout' : params.routeId ? 'route' : 'workout',
+      tab: params.timed ? 'free' : params.workoutId ? 'workout' : params.routeId ? 'route' : 'workout',
+      freeMode: 'tiempo', // pestaña Libre: 'tiempo' (sesión por tiempo disponible) | 'libre' (rodada sin estructura)
+      timed: L.timedChoice(params.timed || settings.lastTimed),
+      timedOther: false,
       workoutId: params.workoutId || null,
       routeId: params.routeId || null,
       ghost: true,
@@ -465,6 +478,59 @@
     if (!cfg.routeId || !R.routes.get(cfg.routeId)) cfg.routeId = routes.length ? routes[0].id : null;
 
     let phase = 'prep';
+
+    const TIMED_DURS = [20, 30, 45, 60, 75, 90];
+    const TIMED_FOCUS_OPTS = [
+      ['auto', 'Recomendado'], ['hoy', 'Versión corta de hoy'], ['recuperacion', 'Recuperación'], ['resistencia', 'Resistencia'], ['tempo', 'Tempo'],
+      ['sweetspot', 'Sweet spot'], ['umbral', 'Umbral'], ['vo2', 'VO2máx'], ['sprints', 'Sprints'], ['sorpresa', 'Sorpresa'],
+    ];
+    // Sesión generada por tiempo disponible (null si la duración no es válida)
+    function genTimed() {
+      const st = store.get();
+      try {
+        return R.training.timedWorkout({ durationMin: cfg.timed.durationMin, focus: cfg.timed.focus, ftp, profile, plan: st.plan, activities: st.activities || [], today: L.ymd() });
+      } catch (e) { return null; }
+    }
+    function saveTimed() {
+      if (cfg.timed.durationMin >= 15 && cfg.timed.durationMin <= 150) {
+        try { store.set({ settings: { lastTimed: { durationMin: cfg.timed.durationMin, focus: cfg.timed.focus } } }); } catch (e) { /* sin guardar */ }
+      }
+    }
+    const isTimedMode = () => cfg.tab === 'free' && cfg.freeMode === 'tiempo';
+
+    function timedCard(todaySession, tw) {
+      const chip = (label, on, onclick, extra) => h('button', Object.assign({ type: 'button', class: 'rd-chip' + (on ? ' is-on' : ''), 'aria-pressed': on ? 'true' : 'false', text: label, onclick: onclick }, extra || {}));
+      const isOther = cfg.timedOther || TIMED_DURS.indexOf(cfg.timed.durationMin) < 0;
+      const durRow = h('div', { class: 'rd-chips', role: 'group', 'aria-label': 'Tiempo disponible' }, TIMED_DURS.map((m) => chip(m + ' min', !isOther && cfg.timed.durationMin === m, () => {
+        cfg.timed.durationMin = m; cfg.timedOther = false; saveTimed(); renderPrep();
+      })).concat([chip('Otro', isOther, () => { cfg.timedOther = true; renderPrep(); })]));
+      const kids = [h('h2', { class: 'rd-h', text: '¿Cuánto tiempo tienes?' }), durRow];
+      if (isOther) {
+        kids.push(h('label', { class: 'rd-lbl', for: 'rd-tmin', text: 'Minutos (15 a 150)' }));
+        kids.push(h('input', {
+          id: 'rd-tmin', class: 'rd-input rd-input--short', type: 'number', inputmode: 'numeric', min: '15', max: '150', step: '1', value: String(cfg.timed.durationMin),
+          onchange: (e) => { cfg.timed.durationMin = Math.round(Number(e.target.value) || 0); saveTimed(); renderPrep(); },
+        }));
+      }
+      kids.push(h('h2', { class: 'rd-h rd-h--sub', text: 'Enfoque' }));
+      kids.push(h('div', { class: 'rd-chips', role: 'group', 'aria-label': 'Enfoque de la sesión' }, TIMED_FOCUS_OPTS
+        .filter((o) => o[0] !== 'hoy' || todaySession)
+        .map((o) => chip(o[1], cfg.timed.focus === o[0], () => { cfg.timed.focus = o[0]; saveTimed(); renderPrep(); }))));
+      return h('section', { class: 'rd-card rd-timed' }, kids);
+    }
+
+    function timedPreview(tw) {
+      if (!tw) return h('section', { class: 'rd-card' }, [h('p', { class: 'rd-warn', text: 'Elige una duración entre 15 y 150 minutos para armar tu sesión.' })]);
+      const same = !tw.generated;
+      return h('section', { class: 'rd-card rd-timed-prev', 'aria-live': 'polite' }, [
+        h('h2', { class: 'rd-h', text: 'Tu sesión' }),
+        h('div', { class: 'rd-wk-name', text: tw.name }),
+        tw.notice ? h('p', { class: 'rd-warn', role: 'status', text: tw.notice }) : null,
+        h('p', { class: 'rd-note', text: same ? 'Tu sesión de hoy ya cabe en ese tiempo: se rueda completa. ' + tw.description : tw.description }),
+        workoutMiniProfile(tw),
+        h('div', { class: 'rd-wk-meta', text: Math.round(tw.durationS / 60) + ' min · TSS ' + Math.round(tw.tss) + ' · FTP ' + ftp + ' W' }),
+      ]);
+    }
 
     function workoutMiniProfile(w) {
       const total = w.durationS;
@@ -494,6 +560,27 @@
       })));
 
       const main = h('div', { class: 'rd-prep-col' });
+      // --- Libre: por tiempo / rodada libre
+      let tw = null;
+      if (cfg.tab === 'free') {
+        const modes = [{ id: 'tiempo', label: 'Por tiempo' }, { id: 'libre', label: 'Rodada libre' }];
+        main.appendChild(h('div', { class: 'rd-tabs rd-seg', role: 'group', 'aria-label': 'Modo de la pestaña Libre' }, modes.map((m) => h('button', {
+          type: 'button', class: 'rd-tab' + (cfg.freeMode === m.id ? ' is-on' : ''), 'aria-pressed': cfg.freeMode === m.id ? 'true' : 'false',
+          text: m.label, onclick: () => { cfg.freeMode = m.id; renderPrep(); },
+        }))));
+        if (cfg.freeMode === 'tiempo') {
+          const todaySession = L.pickTodayWorkout(state0.plan, L.ymd());
+          if (cfg.timed.focus === 'hoy' && !todaySession) cfg.timed.focus = 'auto';
+          tw = genTimed();
+          main.appendChild(timedCard(todaySession, tw));
+          main.appendChild(timedPreview(tw));
+        } else {
+          main.appendChild(h('section', { class: 'rd-card' }, [
+            h('h2', { class: 'rd-h', text: 'Rodada libre' }),
+            h('p', { class: 'rd-note', text: 'Sin estructura ni meta: pedaleas el tiempo que quieras y fijas tu potencia a mano.' }),
+          ]));
+        }
+      }
       // --- modo
       if (cfg.tab === 'workout') {
         const lib = R.training.library;
@@ -531,7 +618,7 @@
           h('label', { class: 'rd-h', for: 'rd-bg', text: 'Ruta de fondo (paisaje)' }),
           h('select', { id: 'rd-bg', class: 'rd-select', onchange: (e) => { cfg.routeId = e.target.value; renderPrep(); } },
             routes.map((r) => h('option', { value: r.id, selected: r.id === cfg.routeId, text: r.name + ' · ' + L.fmtKm(r.distanceM) + ' km' }))),
-          h('p', { class: 'rd-note', text: cfg.tab === 'workout'
+          h('p', { class: 'rd-note', text: cfg.tab === 'workout' || isTimedMode()
             ? 'Recorres el paisaje con la velocidad que da tu potencia en la pendiente real. La pendiente no se envía al rodillo: manda el entrenamiento. ' + LOOP_MSG
             : 'Sin meta: rueda el tiempo que quieras. ' + LOOP_MSG }),
         ]));
@@ -540,7 +627,7 @@
       // --- cómo se controla la potencia (simulador)
       main.appendChild(h('section', { class: 'rd-card' }, [
         h('h2', { class: 'rd-h', text: 'Potencia' }),
-        h('p', { class: 'rd-note', text: cfg.tab === 'workout'
+        h('p', { class: 'rd-note', text: cfg.tab === 'workout' || isTimedMode()
           ? 'El simulador sigue solo la potencia objetivo de cada paso. Ajusta la intensidad con las flechas ↑ ↓ (±5 %) o con los botones − y +.'
           : 'Fija tu potencia con las flechas ↑ ↓ (±10 W), con los botones − y + o con el deslizador; la velocidad sale de la física según la pendiente.' }),
       ]));
@@ -568,13 +655,13 @@
         L.CAMERAS.map((c) => h('option', { value: c.id, selected: c.id === cfg.camera, text: c.label }))));
       main.appendChild(opts);
 
-      const ready = !!cfg.routeId;
+      const ready = !!cfg.routeId && (!isTimedMode() || !!tw);
       const start = h('button', { type: 'button', class: 'rd-btn rd-btn--primary rd-start', disabled: !ready, onclick: () => beginCountdown(), text: 'Comenzar' });
       root.appendChild(h('header', { class: 'rd-prep-head' }, [h('h1', { class: 'rd-title', text: 'Rodar' })]));
       root.appendChild(tablist);
       root.appendChild(main);
       root.appendChild(h('div', { class: 'rd-startbar' }, [
-        start, !ready ? h('span', { class: 'rd-note', text: 'No hay rutas para rodar.' }) : null,
+        start, !cfg.routeId ? h('span', { class: 'rd-note', text: 'No hay rutas para rodar.' }) : null,
       ]));
     }
 
@@ -656,13 +743,14 @@
       if (scene.setViewInsets) scene.setViewInsets(ins);
     }
 
-    function currentMode() { return cfg.tab; } // 'workout' | 'route' | 'free'
+    function currentMode() { return isTimedMode() ? 'workout' : cfg.tab; } // 'workout' | 'route' | 'free' (por tiempo = entrenamiento)
 
     function beginCountdown() {
       const mode = currentMode();
       const route = R.routes.get(cfg.routeId);
       if (!route) { say('Elige una ruta para continuar.', 'warn'); return; }
-      const workout = mode === 'workout' ? R.training.getWorkout(cfg.workoutId) : null;
+      const workout = isTimedMode() ? genTimed() : mode === 'workout' ? R.training.getWorkout(cfg.workoutId) : null;
+      if (workout && workout.generated) R.training.registerWorkout(workout);
       if (mode === 'workout' && !workout) { say('No encontramos ese entrenamiento.', 'warn'); return; }
 
       ride = {
@@ -1223,6 +1311,7 @@
       const activity = L.buildActivity({
         type: r.mode, name, routeId: r.mode === 'route' ? r.route.id : null,
         workoutId: r.workout ? r.workout.id : null, samples, ftp, date: r.startedAt,
+        workout: r.workout && r.workout.generated ? R.training.compactWorkout(r.workout) : null,
       });
       const completed = auto && ((r.mode === 'route' && r.distM >= r.route.distanceM - 1) || (r.workout && r.tS >= r.workout.durationS));
       if (completed && coach) coach.event('end');
