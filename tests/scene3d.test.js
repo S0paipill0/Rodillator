@@ -455,3 +455,40 @@ test('modos de camara: Cerca primero, conserva lateral y aerea', () => {
   assert.strictEqual(I.CAMERA_MODES[0], 'cerca');
   for (const m of ['persecucion', 'aerea', 'lateral']) assert.ok(I.CAMERA_MODES.includes(m));
 });
+
+test('mergeParts: normales finitas y unitarias (incluye escala no uniforme y sin normales), indices desplazados', () => {
+  const identity = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+  // escala (2, 1, 1) + traslacion (5, 0, 0), columna-mayor
+  const scaled = [2, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 5, 0, 0, 1];
+  const tri = { pos: [0, 0, 0, 1, 0, 0, 0, 1, 0], nor: [0, 0, 1, 0, 0, 1, 0, 0, 1], index: [0, 1, 2], color: [0.1, 0.2, 0.3], m: identity };
+  const slab = { pos: [0, 0, 0, 1, 0, 0, 0, 1, 0], nor: [1, 1, 0, 1, 1, 0, 1, 1, 0], index: null, color: [1, 0, 0], m: scaled };
+  const noNor = { pos: [0, 0, 0, 1, 0, 0, 0, 1, 0], nor: null, index: [2, 1, 0], color: [0, 1, 0], m: identity };
+  const g = I.mergeParts([tri, slab, noNor]);
+  assert.strictEqual(g.position.length, 27);
+  for (const arr of [g.position, g.normal, g.color]) for (const v of arr) assert.ok(Number.isFinite(v));
+  for (let i = 0; i < 9; i++) {
+    const l = Math.hypot(g.normal[i * 3], g.normal[i * 3 + 1], g.normal[i * 3 + 2]);
+    assert.ok(Math.abs(l - 1) < 1e-6, 'normal unitaria ' + l);
+  }
+  // normal (1,1,0) con escala x2: la inversa transpuesta la inclina hacia y -> (1/2, 1, 0) normalizada
+  const n = [g.normal[9], g.normal[10], g.normal[11]];
+  assert.ok(Math.abs(n[0] - 0.5 / Math.hypot(0.5, 1)) < 1e-6 && Math.abs(n[1] - 1 / Math.hypot(0.5, 1)) < 1e-6);
+  assert.ok(Math.abs(g.position[12] - 7) < 1e-6, 'x = 2*1 + 5');
+  assert.deepStrictEqual(Array.from(g.index), [0, 1, 2, 3, 4, 5, 8, 7, 6]);
+  assert.deepStrictEqual(Array.from(g.color.slice(0, 3)).map((v) => Math.round(v * 10)), [1, 2, 3]);
+});
+
+test('camara Cerca con 28 % reservado: rueda trasera dentro de la zona libre en subida de 6 % con viewH 650', () => {
+  const viewH = 650, reserve = I.chaseReserve(viewH), free = viewH - reserve, fov = 55;
+  assert.ok(reserve / viewH >= 0.27);
+  const grade = 0.06;
+  const back = I.chaseBackDistance(viewH, free, fov);
+  const c = I.chaseCamera({ x: 0, y: 0, z: 0, heading: 0, grade }, { back });
+  const cam = { x: c.x, y: c.y, z: c.z }, look = { x: c.lx, y: c.ly, z: c.lz };
+  // la altura del camino bajo la rueda trasera (1 m atras) es -grade
+  const wheelNdc = I.ndcY(cam, look, { x: -0.5, y: -0.5 * grade, z: 0 }, fov);
+  const px = free / 2 - wheelNdc * viewH / 2;            // y en pantalla (0 = arriba) con el centro optico en el centro de la zona libre
+  assert.ok(px < free - 8, 'rueda en y=' + px + ' de ' + free);
+  const headNdc = I.ndcY(cam, look, { x: 0, y: 1.75, z: 0 }, fov);
+  assert.ok(free / 2 - headNdc * viewH / 2 > 0, 'cabeza dentro');
+});

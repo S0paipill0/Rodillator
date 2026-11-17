@@ -30,7 +30,7 @@
   // Camara "Cerca": detras y apenas sobre el ciclista (tipo videojuego)
   var CHASE = {
     back: 5, backMin: 4.5, backMax: 7, height: 2.4, aheadM: 9, lookUp: 1.1,
-    fovDesktop: 55, fovPortrait: 62, headingTau: 0.6, riderH: 1.75, targetFrac: 0.33, minScale: 0.45
+    fovDesktop: 55, fovPortrait: 62, reserveBottom: 0.28, headingTau: 0.6, riderH: 1.75, targetFrac: 0.33, minScale: 0.45
   };
   var LABEL_NEAR_BOTS = 4;       // etiquetas visibles: usuario + fantasma + los 4 bots mas cercanos a la camara
 
@@ -49,6 +49,41 @@
   /* ------------------------------------------------------------------ */
 
   function clamp(v, a, b) { return v < a ? a : (v > b ? b : v); }
+
+  /**
+   * Fusiona partes (posiciones, normales, indices, color y matriz 4x4 columna-mayor `m` de THREE) en una sola malla
+   * con colores por vertice. Las normales usan la inversa transpuesta de la parte 3x3 (soporta escala no uniforme).
+   * Devuelve { position, normal, color: Float32Array, index: Uint32Array }. Pura: se prueba en Node.
+   */
+  function mergeParts(parts) {
+    var nv = 0, ni = 0, i, k;
+    for (i = 0; i < parts.length; i++) { var cnt = parts[i].pos.length / 3; nv += cnt; ni += parts[i].index ? parts[i].index.length : cnt; }
+    var position = new Float32Array(nv * 3), normal = new Float32Array(nv * 3), color = new Float32Array(nv * 3), index = new Uint32Array(ni);
+    var vo = 0, io = 0;
+    for (i = 0; i < parts.length; i++) {
+      var pt = parts[i], m = pt.m, n = pt.pos.length / 3;
+      // inversa transpuesta de A = [[m0,m4,m8],[m1,m5,m9],[m2,m6,m10]]
+      var a = m[0], b = m[4], c = m[8], d = m[1], e = m[5], f = m[9], g = m[2], h = m[6], j = m[10];
+      var c00 = e * j - f * h, c01 = f * g - d * j, c02 = d * h - e * g;
+      var c10 = c * h - b * j, c11 = a * j - c * g, c12 = b * g - a * h;
+      var c20 = b * f - c * e, c21 = c * d - a * f, c22 = a * e - b * d;
+      for (k = 0; k < n; k++) {
+        var x = pt.pos[k * 3], y = pt.pos[k * 3 + 1], z = pt.pos[k * 3 + 2], o = (vo + k) * 3;
+        position[o] = m[0] * x + m[4] * y + m[8] * z + m[12];
+        position[o + 1] = m[1] * x + m[5] * y + m[9] * z + m[13];
+        position[o + 2] = m[2] * x + m[6] * y + m[10] * z + m[14];
+        var nx = pt.nor ? pt.nor[k * 3] : 0, ny = pt.nor ? pt.nor[k * 3 + 1] : 1, nz = pt.nor ? pt.nor[k * 3 + 2] : 0;
+        var tx = c00 * nx + c01 * ny + c02 * nz, ty = c10 * nx + c11 * ny + c12 * nz, tz = c20 * nx + c21 * ny + c22 * nz;
+        var tl = Math.sqrt(tx * tx + ty * ty + tz * tz) || 1;
+        normal[o] = tx / tl; normal[o + 1] = ty / tl; normal[o + 2] = tz / tl;
+        color[o] = pt.color[0]; color[o + 1] = pt.color[1]; color[o + 2] = pt.color[2];
+      }
+      if (pt.index) { for (k = 0; k < pt.index.length; k++) index[io++] = pt.index[k] + vo; }
+      else { for (k = 0; k < n; k++) index[io++] = vo + k; }
+      vo += n;
+    }
+    return { position: position, normal: normal, color: color, index: index };
+  }
 
   /* ---- camara "Cerca": funciones puras ---- */
 
@@ -90,6 +125,9 @@
       lx: p.x + hx * ahead, ly: p.y + g * ahead + up, lz: p.z + hz * ahead
     };
   }
+
+  /** Margen inferior (px) que la camara Cerca reserva por defecto (escritorio sin insets del HUD): tarjetas de datos + perfil. */
+  function chaseReserve(viewH) { return Math.round(viewH * CHASE.reserveBottom); }
 
   /**
    * Altura vertical normalizada (NDC, +1 arriba, -1 abajo) de un punto del mundo visto desde la camara que mira a `look`
@@ -2487,29 +2525,21 @@
     // Bot lejano o fuera del presupuesto: el cuerpo procedural fusionado en UNA malla (colores por vertice), pose fija.
     var liteMat = null;
     function createLite(st) {
-      var body = st.body, pos = [], nor = [], col = [], idx = [], base = 0, inv = new T.Matrix4(), mm = new T.Matrix4(), nm = new T.Matrix3();
-      var v = new T.Vector3();
+      var body = st.body, parts = [], inv = new T.Matrix4(), mm = new T.Matrix4();
       root_updateWorld(st);
       inv.copy(body.matrixWorld).invert();
       body.traverse(function (o) {
         if (!o.isMesh || !o.geometry || !o.geometry.attributes.position) return;
-        var g = o.geometry, P = g.attributes.position, N = g.attributes.normal, c = o.material.color, k;
+        var g = o.geometry, c = o.material.color;
         mm.multiplyMatrices(inv, o.matrixWorld);
-        nm.getNormalMatrix(mm);
-        for (k = 0; k < P.count; k++) {
-          v.fromBufferAttribute(P, k).applyMatrix4(mm); pos.push(v.x, v.y, v.z);
-          if (N) { v.fromBufferAttribute(N, k).applyMatrix4(nm).normalize(); nor.push(v.x, v.y, v.z); } else nor.push(0, 1, 0);
-          col.push(c.r, c.g, c.b);
-        }
-        if (g.index) { for (k = 0; k < g.index.count; k++) idx.push(g.index.getX(k) + base); }
-        else { for (k = 0; k < P.count; k++) idx.push(base + k); }
-        base += P.count;
+        parts.push({ pos: g.attributes.position.array, nor: g.attributes.normal ? g.attributes.normal.array : null, index: g.index ? g.index.array : null, color: [c.r, c.g, c.b], m: mm.elements.slice() });
       });
+      var mg = mergeParts(parts);
       var geom = new T.BufferGeometry();
-      geom.setAttribute('position', new T.Float32BufferAttribute(pos, 3));
-      geom.setAttribute('normal', new T.Float32BufferAttribute(nor, 3));
-      geom.setAttribute('color', new T.Float32BufferAttribute(col, 3));
-      geom.setIndex(idx);
+      geom.setAttribute('position', new T.BufferAttribute(mg.position, 3));
+      geom.setAttribute('normal', new T.BufferAttribute(mg.normal, 3));
+      geom.setAttribute('color', new T.BufferAttribute(mg.color, 3));
+      geom.setIndex(new T.BufferAttribute(mg.index, 1));
       geom.computeBoundingSphere();
       if (!liteMat) liteMat = track(new T.MeshStandardMaterial({ vertexColors: true, roughness: 0.75, metalness: 0.05 }));
       var me = new T.Mesh(geom, liteMat);
@@ -2816,7 +2846,7 @@
 
     function setCameraMode(mode) {
       if (CAMERA_MODES.indexOf(mode) < 0) throw new TypeError('Scene3D: modo de camara invalido: ' + mode);
-      if (mode !== cameraMode) { cameraMode = mode; camBlend = 1.2; applyProjection(); }
+      if (mode !== cameraMode) { cameraMode = mode; camBlend = 1.2; camHeadReady = false; occScale = 1; applyProjection(); }
     }
 
     /* ---- tamano, calidad (manual o automatica) ---- */
@@ -2824,11 +2854,11 @@
     var viewW = 640, viewH = 360;
     // Vista compacta (celular vertical u horizontal bajo): mismo criterio para camara, FOV y etiquetas.
     function compactView() { return viewW / viewH < PORTRAIT_ASPECT || viewH <= COMPACT_MAX_H; }
-    // Escritorio: el HUD no informa insets; la camara Cerca reserva ~20 % inferior (tarjetas de datos y perfil) para el ciclista
+    // Escritorio: el HUD no informa insets; la camara Cerca reserva ~28 % inferior (tarjetas de datos y perfil) para el ciclista
     function effInsets() {
       var i = viewInsets;
       if ((cameraMode === 'cerca' || cameraMode === 'persecucion') && !(i.top || i.bottom || i.left || i.right)) {
-        return { top: 0, bottom: Math.round(viewH * 0.2), left: 0, right: 0 };
+        return { top: 0, bottom: chaseReserve(viewH), left: 0, right: 0 };
       }
       return i;
     }
@@ -3004,6 +3034,7 @@
         st.label.scale.set(st.labelW * ls, st.labelW * ls / 4, 1);
         st.label.position.y = 2.3 + 0.6 * (s - 1);
         var vis = lv[i];
+        if (st === uSt && (cameraMode === 'cerca' || cameraMode === 'persecucion')) vis = false;   // en Cerca el usuario se reconoce; la etiqueta tapaba al pelotón
         if (portrait && uSt) {
           // vista compacta: etiquetas mas chicas; el fantasma, un "PB" minimo, oculto si va pegado por detras del usuario
           if (st !== uSt && st.kind === 'ghost' && uSt.distM - st.distM >= 0 && uSt.distM - st.distM < 15) vis = false;
@@ -3096,6 +3127,8 @@
       ndcY: ndcY,
       occlusionScale: occlusionScale,
       labelVisibility: labelVisibility,
+      mergeParts: mergeParts,
+      chaseReserve: chaseReserve,
       CHASE: CHASE,
       CAMERA_MODES: CAMERA_MODES,
       LC: LC,

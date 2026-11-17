@@ -100,8 +100,8 @@ test('chooseLod (media): usuario y fantasma a < 60 m; solo los 3 bots mas cercan
   assert.equal(M(10, 'bot', 0), 'model');
   assert.equal(M(29, 'bot', 2), 'model');
   assert.equal(M(10, 'bot', 3), 'proc', 'cuarto bot mas cercano');
-  assert.equal(M(10, 'bot', 6, 'lite'), 'lite', 'desde el orden 6: lite');
-  assert.equal(M(10, 'bot', 6), 'proc', 'histeresis de orden desde procedural');
+  assert.equal(M(10, 'bot', 7, 'lite'), 'lite', 'desde el orden 7: lite');
+  assert.equal(M(10, 'bot', 7), 'proc', 'histeresis de orden desde procedural');
   assert.equal(M(30, 'bot', 0), 'proc');
   assert.equal(M(32, 'bot', 0, 'model'), 'model', 'histeresis');
   assert.equal(M(35, 'bot', 0, 'model'), 'proc');
@@ -112,7 +112,7 @@ test('chooseLod (baja): solo usuario y fantasma usan el modelo', () => {
   assert.equal(C.chooseLod(12, 'user', 'baja', 'proc', true, -1), 'model');
   assert.equal(C.chooseLod(12, 'ghost', 'baja', 'proc', true, -1), 'model');
   assert.equal(C.chooseLod(12, 'bot', 'baja', 'proc', true, 0), 'proc');
-  assert.equal(C.chooseLod(12, 'bot', 'baja', 'lite', true, 4), 'lite');
+  assert.equal(C.chooseLod(12, 'bot', 'baja', 'lite', true, 5), 'lite');
   assert.equal(C.chooseLod(80, 'ghost', 'baja', 'proc', true, -1), 'proc');
 });
 
@@ -176,6 +176,6 @@ test('chooseLod: pelotón de 20 - cuenta de niveles por calidad (presupuesto de 
     return c;
   };
   assert.deepEqual(count('alta'), { model: 5, proc: 4, lite: 9 });
-  assert.deepEqual(count('media'), { model: 3, proc: 3, lite: 12 });
-  assert.deepEqual(count('baja'), { model: 0, proc: 4, lite: 14 });
+  assert.deepEqual(count('media'), { model: 3, proc: 4, lite: 11 });
+  assert.deepEqual(count('baja'), { model: 0, proc: 5, lite: 13 });
 });

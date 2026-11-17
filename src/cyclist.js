@@ -15,7 +15,7 @@
   var MIN_SPEED_MPS = 0.3;            // m/s: por debajo, el ciclista se considera detenido (animacion en pausa)
   var CLIP_RPM = 60;
   var ALTA_BOTS = 5;                  // calidad alta: bots con modelo (los mas cercanos a la camara); el resto, procedural o lite
-  var LITE_FROM_RANK = { alta: 9, media: 6, baja: 4 };   // desde este orden de cercania, el bot es una sola malla fusionada (1 draw call)
+  var LITE_FROM_RANK = { alta: 9, media: 7, baja: 5 };   // desde este orden de cercania, el bot es una sola malla fusionada (1 draw call)
   var PROC_MAX_M = 45;                // m: mas lejos que esto, todo bot es lite
   var MEDIA_BOTS = 3;                 // calidad media: bots con modelo (los mas cercanos)
   var MEDIA_BOT_M = 30;               // m: calidad media, distancia maxima de bot con modelo
@@ -82,8 +82,8 @@
    * Devuelve 'model' (glTF) | 'proc' (procedural animado, ~16 draw calls) | 'lite' (malla fusionada estatica, 1 draw call).
    * Presupuesto por calidad (pelotones de hasta 20):
    *   alta:  usuario y fantasma con modelo a < 60 m; los ALTA_BOTS (5) bots mas cercanos con modelo; hasta el orden 9, procedural; despues, lite;
-   *   media: usuario y fantasma a < 60 m; los MEDIA_BOTS (3) bots mas cercanos a < 30 m con modelo; hasta el orden 6, procedural; despues, lite;
-   *   baja:  solo usuario y fantasma con modelo; bots procedurales hasta el orden 4 y despues lite.
+   *   media: usuario y fantasma a < 60 m; los MEDIA_BOTS (3) bots mas cercanos a < 30 m con modelo; hasta el orden 7, procedural; despues, lite;
+   *   baja:  solo usuario y fantasma con modelo; bots procedurales hasta el orden 5 y despues lite.
    * Todo bot a mas de PROC_MAX_M (45 m) es lite.
    * botRank: posicion del bot por distancia a la camara entre los bots (0 = el mas cercano).
    * Con histeresis: quien ya usa el modelo lo conserva hasta el limite + LOD_HYSTERESIS_M.
