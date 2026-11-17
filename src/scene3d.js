@@ -23,8 +23,16 @@
   var LANE_HALF = 2.4;              // m maximo desde el eje (camino de 6 m)
   var CLUSTER_M = 2.5;              // m: ciclistas mas cerca que esto se reparten en el carril
   var KIND_COLORS = { user: 0xFF5A1F, ghost: 0xFFD23F, bot: 0x7FA7C9 };
-  var CAMERA_MODES = ['persecucion', 'aerea', 'lateral'];
+  // 'persecucion' y 'cerca' son la misma camara nueva (por defecto, mas cerca y con el ciclista grande);
+  // 'lejos' conserva la antigua persecucion alta y lejana.
+  var CAMERA_MODES = ['cerca', 'persecucion', 'aerea', 'lateral', 'lejos'];
   var BASE_FOV = 58, PORTRAIT_FOV = 70, PORTRAIT_ASPECT = 0.8, COMPACT_MAX_H = 500;
+  // Camara "Cerca": detras y apenas sobre el ciclista (tipo videojuego)
+  var CHASE = {
+    back: 5, backMin: 4.5, backMax: 7, height: 2.4, aheadM: 9, lookUp: 1.1,
+    fovDesktop: 55, fovPortrait: 62, reserveBottom: 0.28, headingTau: 0.6, riderH: 1.75, targetFrac: 0.33, minScale: 0.45
+  };
+  var LABEL_NEAR_BOTS = 4;       // etiquetas visibles: usuario + fantasma + los 4 bots mas cercanos a la camara
 
   // Desplazamiento (x, y) para camera.setViewOffset(w, h, x, y, w, h) que lleva el centro optico
   // al centro de la zona libre {top, bottom, left, right} (px CSS).
@@ -41,6 +49,135 @@
   /* ------------------------------------------------------------------ */
 
   function clamp(v, a, b) { return v < a ? a : (v > b ? b : v); }
+
+  /**
+   * Fusiona partes (posiciones, normales, indices, color y matriz 4x4 columna-mayor `m` de THREE) en una sola malla
+   * con colores por vertice. Las normales usan la inversa transpuesta de la parte 3x3 (soporta escala no uniforme).
+   * Devuelve { position, normal, color: Float32Array, index: Uint32Array }. Pura: se prueba en Node.
+   */
+  function mergeParts(parts) {
+    var nv = 0, ni = 0, i, k;
+    for (i = 0; i < parts.length; i++) { var cnt = parts[i].pos.length / 3; nv += cnt; ni += parts[i].index ? parts[i].index.length : cnt; }
+    var position = new Float32Array(nv * 3), normal = new Float32Array(nv * 3), color = new Float32Array(nv * 3), index = new Uint32Array(ni);
+    var vo = 0, io = 0;
+    for (i = 0; i < parts.length; i++) {
+      var pt = parts[i], m = pt.m, n = pt.pos.length / 3;
+      // inversa transpuesta de A = [[m0,m4,m8],[m1,m5,m9],[m2,m6,m10]]
+      var a = m[0], b = m[4], c = m[8], d = m[1], e = m[5], f = m[9], g = m[2], h = m[6], j = m[10];
+      var c00 = e * j - f * h, c01 = f * g - d * j, c02 = d * h - e * g;
+      var c10 = c * h - b * j, c11 = a * j - c * g, c12 = b * g - a * h;
+      var c20 = b * f - c * e, c21 = c * d - a * f, c22 = a * e - b * d;
+      for (k = 0; k < n; k++) {
+        var x = pt.pos[k * 3], y = pt.pos[k * 3 + 1], z = pt.pos[k * 3 + 2], o = (vo + k) * 3;
+        position[o] = m[0] * x + m[4] * y + m[8] * z + m[12];
+        position[o + 1] = m[1] * x + m[5] * y + m[9] * z + m[13];
+        position[o + 2] = m[2] * x + m[6] * y + m[10] * z + m[14];
+        var nx = pt.nor ? pt.nor[k * 3] : 0, ny = pt.nor ? pt.nor[k * 3 + 1] : 1, nz = pt.nor ? pt.nor[k * 3 + 2] : 0;
+        var tx = c00 * nx + c01 * ny + c02 * nz, ty = c10 * nx + c11 * ny + c12 * nz, tz = c20 * nx + c21 * ny + c22 * nz;
+        var tl = Math.sqrt(tx * tx + ty * ty + tz * tz) || 1;
+        normal[o] = tx / tl; normal[o + 1] = ty / tl; normal[o + 2] = tz / tl;
+        color[o] = pt.color[0]; color[o + 1] = pt.color[1]; color[o + 2] = pt.color[2];
+      }
+      if (pt.index) { for (k = 0; k < pt.index.length; k++) index[io++] = pt.index[k] + vo; }
+      else { for (k = 0; k < n; k++) index[io++] = vo + k; }
+      vo += n;
+    }
+    return { position: position, normal: normal, color: color, index: index };
+  }
+
+  /* ---- camara "Cerca": funciones puras ---- */
+
+  /** Angulo envuelto a (-pi, pi]. */
+  function wrapPi(a) {
+    var T2 = Math.PI * 2;
+    a = a % T2;
+    if (a > Math.PI) a -= T2; else if (a <= -Math.PI) a += T2;
+    return a;
+  }
+
+  /** Filtro de primer orden del rumbo (rad) por el camino mas corto; tau en s (0,6 s: no marea en curvas). */
+  function smoothHeading(cur, target, dt, tau) {
+    if (!(dt > 0)) return cur;
+    var k = 1 - Math.exp(-dt / (tau > 0 ? tau : CHASE.headingTau));
+    return wrapPi(cur + wrapPi(target - cur) * k);
+  }
+
+  /** Distancia hacia atras para que el ciclista ocupe `frac` de la zona libre (altura freeH de viewH px), acotada. */
+  function chaseBackDistance(viewH, freeH, fovDeg, opts) {
+    var o = opts || {}, frac = o.frac || CHASE.targetFrac, rh = o.riderH || CHASE.riderH;
+    var lo = o.min || CHASE.backMin, hi = o.max || CHASE.backMax;
+    if (!(viewH > 0) || !(freeH > 0)) return CHASE.back;
+    var d = rh * viewH / (2 * Math.tan(fovDeg * DEG / 2) * frac * freeH);
+    return clamp(d, lo, hi);
+  }
+
+  /**
+   * Camara de persecucion "Cerca". p = {x, y, z, heading (rad, atan2(hz, hx)), grade (dy/dx)}.
+   * Devuelve la posicion de la camara (back m atras sobre el rumbo, height m sobre el camino, siguiendo la pendiente)
+   * y el punto que mira (aheadM m adelante, lookUp m sobre el camino).
+   */
+  function chaseCamera(p, opts) {
+    var o = opts || {}, back = o.back > 0 ? o.back : CHASE.back, ahead = o.ahead > 0 ? o.ahead : CHASE.aheadM;
+    var h = o.height > 0 ? o.height : CHASE.height, up = o.lookUp != null ? o.lookUp : CHASE.lookUp;
+    var hx = Math.cos(p.heading), hz = Math.sin(p.heading), g = p.grade || 0;
+    return {
+      x: p.x - hx * back, y: p.y + h - g * back, z: p.z - hz * back,
+      lx: p.x + hx * ahead, ly: p.y + g * ahead + up, lz: p.z + hz * ahead
+    };
+  }
+
+  /** Margen inferior (px) que la camara Cerca reserva por defecto (escritorio sin insets del HUD): tarjetas de datos + perfil. */
+  function chaseReserve(viewH) { return Math.round(viewH * CHASE.reserveBottom); }
+
+  /**
+   * Altura vertical normalizada (NDC, +1 arriba, -1 abajo) de un punto del mundo visto desde la camara que mira a `look`
+   * con fov vertical fovDeg; sin balanceo. Sirve para verificar donde queda el ciclista en la pantalla.
+   */
+  function ndcY(cam, look, pt, fovDeg) {
+    var fx = look.x - cam.x, fy = look.y - cam.y, fz = look.z - cam.z, fl = Math.sqrt(fx * fx + fy * fy + fz * fz) || 1;
+    fx /= fl; fy /= fl; fz /= fl;
+    // arriba = componente de Y perpendicular a la direccion de mirada
+    var ux = -fy * fx, uy = 1 - fy * fy, uz = -fy * fz, ul = Math.sqrt(ux * ux + uy * uy + uz * uz) || 1;
+    ux /= ul; uy /= ul; uz /= ul;
+    var vx = pt.x - cam.x, vy = pt.y - cam.y, vz = pt.z - cam.z;
+    var depth = vx * fx + vy * fy + vz * fz, up = vx * ux + vy * uy + vz * uz;
+    return depth > 0 ? up / (depth * Math.tan(fovDeg * DEG / 2)) : 0;
+  }
+
+  /**
+   * Factor [minScale, 1] para acercar la camara al ciclista si algo bloquea la linea de vision.
+   * blocked(x, y, z) -> true si el punto esta dentro de terreno o de un arbol. Se muestrea de la cabeza del ciclista
+   * hacia la camara; el primer bloqueo fija la camara justo antes.
+   */
+  function occlusionScale(rider, cam, blocked, steps, minScale) {
+    var n = steps > 0 ? steps : 10, lo = minScale != null ? minScale : CHASE.minScale;
+    for (var i = 1; i <= n; i++) {
+      var t = i / n;
+      if (blocked(rider.x + (cam.x - rider.x) * t, rider.y + (cam.y - rider.y) * t, rider.z + (cam.z - rider.z) * t)) {
+        return clamp((i - 1.5) / n, lo, 1);
+      }
+    }
+    return 1;
+  }
+
+  /**
+   * Regla de etiquetas visibles: usuario y fantasma siempre, y solo los `nearBots` bots mas cercanos a la camara.
+   * riders: [{kind, d}] (d = distancia a la camara). Devuelve un arreglo de booleanos alineado con riders.
+   */
+  function labelVisibility(riders, nearBots) {
+    var n = riders.length, out = new Array(n), cap = nearBots != null ? nearBots : LABEL_NEAR_BOTS, i, j;
+    for (i = 0; i < n; i++) {
+      var r = riders[i];
+      if (r.kind !== 'bot') { out[i] = true; continue; }
+      var rank = 0;
+      for (j = 0; j < n; j++) {
+        var b = riders[j];
+        if (j !== i && b.kind === 'bot' && (b.d < r.d || (b.d === r.d && j < i))) rank++;
+      }
+      out[i] = rank < cap;
+    }
+    return out;
+  }
 
   function base64ToBytes(b64) {
     var out, i, n;
@@ -2385,14 +2522,40 @@
         wheels: [obj.getObjectByName('__rueda_rear'), obj.getObjectByName('__rueda_front')].filter(Boolean)
       };
     }
+    // Bot lejano o fuera del presupuesto: el cuerpo procedural fusionado en UNA malla (colores por vertice), pose fija.
+    var liteMat = null;
+    function createLite(st) {
+      var body = st.body, parts = [], inv = new T.Matrix4(), mm = new T.Matrix4();
+      root_updateWorld(st);
+      inv.copy(body.matrixWorld).invert();
+      body.traverse(function (o) {
+        if (!o.isMesh || !o.geometry || !o.geometry.attributes.position) return;
+        var g = o.geometry, c = o.material.color;
+        mm.multiplyMatrices(inv, o.matrixWorld);
+        parts.push({ pos: g.attributes.position.array, nor: g.attributes.normal ? g.attributes.normal.array : null, index: g.index ? g.index.array : null, color: [c.r, c.g, c.b], m: mm.elements.slice() });
+      });
+      var mg = mergeParts(parts);
+      var geom = new T.BufferGeometry();
+      geom.setAttribute('position', new T.BufferAttribute(mg.position, 3));
+      geom.setAttribute('normal', new T.BufferAttribute(mg.normal, 3));
+      geom.setAttribute('color', new T.BufferAttribute(mg.color, 3));
+      geom.setIndex(new T.BufferAttribute(mg.index, 1));
+      geom.computeBoundingSphere();
+      if (!liteMat) liteMat = track(new T.MeshStandardMaterial({ vertexColors: true, roughness: 0.75, metalness: 0.05 }));
+      var me = new T.Mesh(geom, liteMat);
+      me.castShadow = false;
+      me.visible = false;
+      st.root.add(me);
+      st.lite = me;
+    }
+    function root_updateWorld(st) { st.root.updateMatrixWorld(true); }
     function removeModelInstance(st) {
       var md = st.model;
       if (!md) return;
       if (md.mixer) { md.mixer.stopAllAction(); md.mixer.uncacheRoot(md.obj); cyc.mixers--; }
       st.root.remove(md.holder);
       st.model = null;
-      st.lod = 'proc';
-      st.body.visible = true;
+      if (st.lod === 'model') { st.lod = 'proc'; st.body.visible = true; }
     }
     // distancia a la camara y orden de los bots por cercania (sin crear objetos)
     function rankRiders() {
@@ -2419,8 +2582,10 @@
       var want = CY.chooseLod(d, st.kind, level, st.lod, !!cyc.tpl, st.botRank);
       if (want !== st.lod) {
         if (want === 'model' && !st.model) createModelInstance(st);
+        if (want === 'lite' && !st.lite) createLite(st);
         if (st.model) st.model.holder.visible = want === 'model';
-        st.body.visible = want !== 'model';
+        if (st.lite) st.lite.visible = want === 'lite';
+        st.body.visible = want === 'proc';
         st.lod = want;
       }
       if (st.lod !== 'model') {
@@ -2428,7 +2593,7 @@
         return;
       }
       var md = st.model, k;
-      var cast = Q.shadows && CY.castsShadow(st.kind, level, d);
+      var cast = Q.shadows && CY.castsShadow(st.kind, level, d, st.botRank);
       if (cast !== md.cast) {
         md.cast = cast;
         for (k = 0; k < md.meshes.length; k++) md.meshes[k].castShadow = cast;
@@ -2447,6 +2612,7 @@
       }
     }
 
+    var _lvIn = [];
     var riderList = [], riderById = {}, seenToken = 0, simTime = 0, botSeq = 0;
     function normKind(k) { return KIND_COLORS[k] !== undefined ? k : 'bot'; }
 
@@ -2489,7 +2655,7 @@
         id: r.id, kind: kind, root: root, body: body, team: team, token: 0, distM: r.distM, lastD: r.distM, lastT: simTime, speed: 0,
         phase: Math.random() * Math.PI * 2, tx: 0, ty: 0, tz: 0, tq: new T.Quaternion(), hx: 1, hz: 0, fresh: true,
         wheels: [], thighs: [], shins: [], feet: [], labelText: null, label: null,
-        cadenceRpm: null, lod: 'proc', model: null, camD: 0, botRank: -1
+        cadenceRpm: null, lod: 'proc', model: null, lite: null, camD: 0, botRank: -1
       };
       // con modelo glTF, los bots procedurales (lejanos o fuera del presupuesto) no proyectan sombra
       var procCast = kind !== 'ghost' && !(kind === 'bot' && cyc.enabled);
@@ -2537,6 +2703,7 @@
 
     function removeRider(st) {
       removeModelInstance(st);
+      if (st.lite) { st.lite.geometry.dispose(); st.lite = null; }
       scene.remove(st.root);
       st.labelTex.dispose(); st.labelMat.dispose();
       delete riderById[st.id];
@@ -2601,43 +2768,74 @@
     }
 
     /* ---- camara ---- */
-    var cameraMode = 'persecucion';
+    var cameraMode = 'cerca';
     var camPos = new T.Vector3(), camLook = new T.Vector3(), wantPos = new T.Vector3(), wantLook = new T.Vector3();
-    var camReady = false, _ahead = { x: 0, y: 0, z: 0, i: 0 };
+    var camReady = false, _ahead = { x: 0, y: 0, z: 0, i: 0 }, _pb2 = { x: 0, y: 0, z: 0, i: 0 };
 
     function userState() {
       for (var i = 0; i < riderList.length; i++) if (riderList[i].kind === 'user') return riderList[i];
       return riderList.length ? riderList[0] : null;
     }
 
-    function updateCamera(dt) {
+    var camHead = 0, camHeadReady = false, occScale = 1, camBlend = 0, camChaseY = 0, _rq2 = { d: 0, sd: 0, y: 0, k: 0, yb: 0 };
+    var _rd = { x: 0, y: 0, z: 0 }, _cm = { x: 0, y: 0, z: 0 };
+    // punto de la linea de vision bloqueado por terreno o por la franja de arboles (a >= 9 m del eje del camino)
+    function camBlocked(x, y, z) {
+      if (y < Math.max(gridHeight(grid, x, z), surfaceHeight(x, z)) + 0.5) return true;
+      roadQuery(roadIdx, x, z, 14, 8, _rq2);
+      return _rq2.d > 7.5;
+    }
+
+    var camLastMs = 0;
+    function updateCamera(simDt) {
+      // la camara sigue al ciclista, que avanza en tiempo real: usa el reloj de pared (acotado) para no quedarse atras con fps bajos
+      var nowMs = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+      var dt = camLastMs ? clamp((nowMs - camLastMs) / 1000, 0, 0.5) : simDt;
+      camLastMs = nowMs;
+      if (dt < simDt) dt = simDt;
       var u = userState(), px, py, pz, hx, hz, d;
       if (u) {
         px = u.root.position.x; py = u.root.position.y; pz = u.root.position.z; hx = u.hx; hz = u.hz; d = u.distM;
       } else {
         pathPose(path, 0, _pose); px = _pose.x; py = _pose.y; pz = _pose.z; hx = _pose.hx; hz = _pose.hz; d = 0;
       }
-      var kPos = 5, kLook = 7;
+      var kPos = 5, kLook = 7, chase = cameraMode === 'cerca' || cameraMode === 'persecucion', direct = false;
       if (cameraMode === 'aerea') {
         wantPos.set(px, py + 400, pz + 160); wantLook.set(px, py, pz);
         kPos = 2.5; kLook = 4;
       } else if (cameraMode === 'lateral') {
-        wantPos.set(px - hz * 9, py + 1.9, pz + hx * 9);           // 9 m a la derecha del rumbo
-        wantLook.set(px + hx * 2, py + 1, pz + hz * 2);
-      } else if (compactView()) {
-        // vertical (celular): mas atras y mas alto, y mira casi al ciclista para que quede en el centro de la zona libre
-        wantPos.set(px - hx * 15, py + 6.5, pz - hz * 15);
-        pathAt(path, d + 6, _ahead);
-        wantLook.set(_ahead.x, _ahead.y + 1.2, _ahead.z);
-      } else {
-        wantPos.set(px - hx * 12, py + 5, pz - hz * 12);           // 12 m atras, 5 m arriba
-        pathAt(path, d + 20, _ahead);                              // mira 20 m adelante
+        // 9 m a la derecha del rumbo; la zona libre (setViewInsets) deja el ciclista fuera de la columna de botones
+        wantPos.set(px - hz * 9, py + 1.9, pz + hx * 9);
+        wantLook.set(px + hx * 0.3, py + 1, pz + hz * 0.3);        // al ciclista (centro de la zona libre): antes quedaba bajo la columna de botones
+      } else if (chase) {
+        var th = Math.atan2(hz, hx);
+        if (!camHeadReady) { camHead = th; camHeadReady = true; } else camHead = smoothHeading(camHead, th, dt, CHASE.headingTau);
+        pathAt(path, d + 6, _ahead); pathAt(path, d - 6, _pb2);
+        var gr = (_ahead.y - _pb2.y) / Math.max(1, Math.hypot(_ahead.x - _pb2.x, _ahead.z - _pb2.z));
+        var vf = chaseView();
+        var cc = chaseCamera({ x: px, y: py, z: pz, heading: camHead, grade: gr },
+          { back: chaseBackDistance(viewH, vf.freeH, camera.fov) });
+        _rd.x = px; _rd.y = py + 1.2; _rd.z = pz;
+        _cm.x = cc.x; _cm.y = cc.y; _cm.z = cc.z;
+        var tgt = occlusionScale(_rd, _cm, camBlocked, 12, CHASE.minScale);
+        if (tgt < occScale) occScale = tgt; else occScale += (tgt - occScale) * (1 - Math.exp(-dt * 1.5));
+        wantPos.set(px + (cc.x - px) * occScale, cc.y, pz + (cc.z - pz) * occScale);
+        wantLook.set(cc.lx, cc.ly, cc.lz);
+        direct = camBlend <= 0;
+      } else {                                                      // 'lejos': la antigua persecucion alta
+        var far = compactView() ? 15 : 12, hi = compactView() ? 6.5 : 5, la = compactView() ? 6 : 20;
+        wantPos.set(px - hx * far, py + hi, pz - hz * far);
+        pathAt(path, d + la, _ahead);
         wantLook.set(_ahead.x, _ahead.y + 1.2, _ahead.z);
       }
-      var gy = Math.max(gridHeight(grid, wantPos.x, wantPos.z), surfaceHeight(wantPos.x, wantPos.z)) + 2;
+      var gy = Math.max(gridHeight(grid, wantPos.x, wantPos.z), surfaceHeight(wantPos.x, wantPos.z)) + (chase ? 0.8 : 2);
       if (wantPos.y < gy) wantPos.y = gy;
+      if (camBlend > 0) camBlend = Math.max(0, camBlend - dt);
       if (!camReady) {
         camPos.copy(wantPos); camLook.copy(wantLook); camReady = true;
+      } else if (direct) {
+        camPos.x = wantPos.x; camPos.z = wantPos.z; camLook.copy(wantLook);
+        camPos.y += (wantPos.y - camPos.y) * (1 - Math.exp(-dt * 10));    // solo la altura se suaviza (baches del terreno)
       } else {
         camPos.lerp(wantPos, 1 - Math.exp(-dt * kPos));
         camLook.lerp(wantLook, 1 - Math.exp(-dt * kLook));
@@ -2648,7 +2846,7 @@
 
     function setCameraMode(mode) {
       if (CAMERA_MODES.indexOf(mode) < 0) throw new TypeError('Scene3D: modo de camara invalido: ' + mode);
-      cameraMode = mode;
+      if (mode !== cameraMode) { cameraMode = mode; camBlend = 1.2; camHeadReady = false; occScale = 1; applyProjection(); }
     }
 
     /* ---- tamano, calidad (manual o automatica) ---- */
@@ -2656,10 +2854,20 @@
     var viewW = 640, viewH = 360;
     // Vista compacta (celular vertical u horizontal bajo): mismo criterio para camara, FOV y etiquetas.
     function compactView() { return viewW / viewH < PORTRAIT_ASPECT || viewH <= COMPACT_MAX_H; }
+    // Escritorio: el HUD no informa insets; la camara Cerca reserva ~28 % inferior (tarjetas de datos y perfil) para el ciclista
+    function effInsets() {
+      var i = viewInsets;
+      if ((cameraMode === 'cerca' || cameraMode === 'persecucion') && !(i.top || i.bottom || i.left || i.right)) {
+        return { top: 0, bottom: chaseReserve(viewH), left: 0, right: 0 };
+      }
+      return i;
+    }
+    function chaseView() { var i = effInsets(); return { freeH: Math.max(50, viewH - i.top - i.bottom) }; }
     function applyProjection() {
       camera.aspect = viewW / viewH;
-      camera.fov = compactView() ? PORTRAIT_FOV : BASE_FOV;
-      var o = viewOffsetFor(viewW, viewH, viewInsets);
+      var chaseCam = cameraMode === 'cerca' || cameraMode === 'persecucion';
+      camera.fov = chaseCam ? (compactView() ? CHASE.fovPortrait : CHASE.fovDesktop) : (compactView() ? PORTRAIT_FOV : BASE_FOV);
+      var o = viewOffsetFor(viewW, viewH, effInsets());
       if (o.x !== 0 || o.y !== 0) camera.setViewOffset(viewW, viewH, o.x, o.y, viewW, viewH);
       else camera.clearViewOffset();
       camera.updateProjectionMatrix();
@@ -2761,6 +2969,11 @@
         meshesPerRider: cyc.tpl ? cyc.tpl.meshes : 0, trianglesPerRider: cyc.tpl ? Math.round(cyc.tpl.triangles) : 0
       };
     }
+    function cameraStats() {
+      var u = userState(), d = u ? camera.position.distanceTo(u.root.position) : 0;
+      return { mode: cameraMode, fov: camera.fov, occScale: Math.round(occScale * 100) / 100, distToUser: Math.round(d * 10) / 10, heading: Math.round(camHead * 100) / 100,
+        cam: [camera.position.x, camera.position.y, camera.position.z].map(Math.round), user: u ? [u.root.position.x, u.root.position.y, u.root.position.z].map(Math.round) : null, hx: u ? u.hx : 0, hz: u ? u.hz : 0, blend: camBlend };
+    }
     function getStats() {
       var info = renderer.info.render;
       return {
@@ -2769,7 +2982,7 @@
         totalDrawCalls: info.calls + shadowPass.calls,
         instances: instanceCount(), quality: level, mode: qualityMode,
         hiTiles: hiTiles.size, vegChunks: vegLayer.map.size, grassChunks: grassLayer.map.size, landcover: lc.synthetic ? 'sintetica' : 'ruta',
-        cyclist: cyclistStats()
+        cyclist: cyclistStats(), camera: cameraStats()
       };
     }
 
@@ -2782,16 +2995,18 @@
       if (monitor.feed(dtS) && qualityMode === 'auto' && level !== 'baja') applyLevel(downgradeQuality(level));
 
       var kr = 1 - Math.exp(-dt * 18), i, st;
-      if (cyc.enabled) rankRiders();
+      if (R.cyclist) rankRiders();
       var cx = camera.position.x, cy = camera.position.y, cz = camera.position.z;
-      // vertical (celular): se evita el amontonamiento de etiquetas sobre el ciclista del usuario
-      var portrait = compactView(), uSt = userState(), nearBot = null, nearBotD = 1e9;
-      if (portrait && uSt) {
-        for (i = 0; i < riderList.length; i++) {
-          st = riderList[i];
-          if (st.kind === 'bot' && st.distM >= uSt.distM && st.distM - uSt.distM < nearBotD) { nearBot = st; nearBotD = st.distM - uSt.distM; }
-        }
+      // etiquetas: usuario + fantasma + los LABEL_NEAR_BOTS bots mas cercanos a la camara (evita el amontonamiento con pelotones de 20)
+      var portrait = compactView(), uSt = userState(), lvIn = _lvIn, lv;
+      lvIn.length = riderList.length;
+      for (i = 0; i < riderList.length; i++) {
+        st = riderList[i];
+        var ex = st.root.position.x - cx, ey = st.root.position.y - cy, ez = st.root.position.z - cz;
+        lvIn[i] = lvIn[i] || { kind: '', d: 0 };
+        lvIn[i].kind = st.kind; lvIn[i].d = ex * ex + ey * ey + ez * ez;
       }
+      lv = labelVisibility(lvIn, LABEL_NEAR_BOTS);
       for (i = 0; i < riderList.length; i++) {
         st = riderList[i];
         var p = st.root.position;
@@ -2802,8 +3017,8 @@
           p.x += ddx * kr; p.y += ddy * kr; p.z += ddz * kr;
           st.root.quaternion.slerp(st.tq, kr);
         }
-        if (cyc.enabled && R.cyclist) updateRiderModel(st, dt);
-        if (st.speed > 0.05 && st.lod !== 'model') {
+        if (R.cyclist) updateRiderModel(st, dt);
+        if (st.speed > 0.05 && st.lod === 'proc') {
           var rev = clamp(st.speed / 8 * 1.4, 0, 2.2);              // rev/s de cadencia segun velocidad
           st.phase += rev * 2 * Math.PI * dt;
           if (st.phase > 62831) st.phase -= 62831;
@@ -2814,14 +3029,15 @@
         // etiqueta: tamano aparente constante a partir de 16 m de la camara
         var lx = p.x - cx, ly = p.y - cy, lz = p.z - cz;
         var s = Math.sqrt(lx * lx + ly * ly + lz * lz) / 16;
+        var ls = s < 0.3 ? 0.3 : s;                                   // camara cercana (5 m): etiqueta reducida, mismo tamano aparente
         if (s < 1) s = 1;
-        st.label.scale.set(st.labelW * s, st.labelW * s / 4, 1);
-        st.label.position.y = 2.4 + 0.6 * (s - 1);
-        var vis = true;
-        if (portrait && uSt && st !== uSt) {
-          // vista compacta: solo el bot mas cercano por delante lleva etiqueta; el fantasma, un "PB" minimo
-          // el "PB" se oculta si el fantasma va pegado por detras: su etiqueta caeria sobre el ciclista
-          vis = st.kind === 'bot' ? st === nearBot : !(uSt.distM - st.distM >= 0 && uSt.distM - st.distM < 15);
+        st.label.scale.set(st.labelW * ls, st.labelW * ls / 4, 1);
+        st.label.position.y = 2.3 + 0.6 * (s - 1);
+        var vis = lv[i];
+        if (st === uSt && (cameraMode === 'cerca' || cameraMode === 'persecucion')) vis = false;   // en Cerca el usuario se reconoce; la etiqueta tapaba al pelotón
+        if (portrait && uSt) {
+          // vista compacta: etiquetas mas chicas; el fantasma, un "PB" minimo, oculto si va pegado por detras del usuario
+          if (st !== uSt && st.kind === 'ghost' && uSt.distM - st.distM >= 0 && uSt.distM - st.distM < 15) vis = false;
           if (vis) st.label.scale.multiplyScalar(st.kind === 'ghost' ? 0.55 : 0.7);
         }
         if (st.label.visible !== vis) st.label.visible = vis;
@@ -2904,6 +3120,17 @@
       pathAt: pathAt,
       pathPose: pathPose,
       viewOffsetFor: viewOffsetFor,
+      wrapPi: wrapPi,
+      smoothHeading: smoothHeading,
+      chaseBackDistance: chaseBackDistance,
+      chaseCamera: chaseCamera,
+      ndcY: ndcY,
+      occlusionScale: occlusionScale,
+      labelVisibility: labelVisibility,
+      mergeParts: mergeParts,
+      chaseReserve: chaseReserve,
+      CHASE: CHASE,
+      CAMERA_MODES: CAMERA_MODES,
       LC: LC,
       LC_NAMES: LC_NAMES,
       decodeLandcover: decodeLandcover,

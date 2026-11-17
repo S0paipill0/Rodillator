@@ -382,3 +382,113 @@ test('fbmTile: valores en [0,1) y textura repetible sin costura', () => {
   for (let y = 0; y < S; y++) { edge += Math.abs(f[y * S] - f[y * S + S - 1]); inner += Math.abs(f[y * S + 31] - f[y * S + 32]); }
   assert.ok(edge < inner * 3 + 0.05, 'sin costura (borde ' + edge.toFixed(3) + ' vs interior ' + inner.toFixed(3) + ')');
 });
+
+/* ---- Tarea 19: camara "Cerca" y etiquetas ---- */
+const DEGR = Math.PI / 180;
+
+test('chaseCamera: llano, rumbo +X: 5 m atras, 2,4 m arriba, mira 9 m adelante y 1,1 m sobre el camino', () => {
+  const c = I.chaseCamera({ x: 100, y: 10, z: 50, heading: 0, grade: 0 });
+  assert.ok(Math.abs(c.x - 95) < 1e-9 && Math.abs(c.z - 50) < 1e-9);
+  assert.ok(Math.abs(c.y - 12.4) < 1e-9);
+  assert.ok(Math.abs(c.lx - 109) < 1e-9 && Math.abs(c.ly - 11.1) < 1e-9);
+});
+
+test('chaseCamera: rumbo +Z y pendiente 10 % (la camara sigue el camino, no flota)', () => {
+  const c = I.chaseCamera({ x: 0, y: 0, z: 0, heading: Math.PI / 2, grade: 0.1 });
+  assert.ok(Math.abs(c.x) < 1e-9 && Math.abs(c.z + 5) < 1e-9);
+  assert.ok(Math.abs(c.y - (2.4 - 0.5)) < 1e-9);
+  assert.ok(Math.abs(c.lz - 9) < 1e-9 && Math.abs(c.ly - (0.9 + 1.1)) < 1e-9);
+});
+
+test('chaseBackDistance: 4,5..7 m; escritorio ~5 m, vertical con zona libre pequena se acota', () => {
+  const dsk = I.chaseBackDistance(800, 800, 55);
+  assert.ok(dsk >= 4.5 && dsk <= 5.5, 'escritorio ' + dsk);
+  assert.strictEqual(I.chaseBackDistance(844, 300, 62), I.CHASE.backMax);
+  assert.strictEqual(I.chaseBackDistance(800, 800, 120), I.CHASE.backMin);
+});
+
+test('el ciclista ocupa 30-40 % de la zona libre y queda en la mitad inferior (escritorio y vertical)', () => {
+  const cases = [{ vh: 800, top: 0, bottom: 0, fov: 55 }, { vh: 844, top: 120, bottom: 200, fov: 62 }];
+  for (const k of cases) {
+    const free = k.vh - k.top - k.bottom;
+    const back = I.chaseBackDistance(k.vh, free, k.fov);
+    const c = I.chaseCamera({ x: 0, y: 0, z: 0, heading: 0, grade: 0 }, { back });
+    const cam = { x: c.x, y: c.y, z: c.z }, look = { x: c.lx, y: c.ly, z: c.lz };
+    const top = I.ndcY(cam, look, { x: 0, y: 1.75, z: 0 }, k.fov), bot = I.ndcY(cam, look, { x: 0, y: 0, z: 0 }, k.fov);
+    const frac = (top - bot) / 2 * k.vh / free;      // NDC abarca 2 = viewH px
+    assert.ok(frac > 0.3 && frac < 0.5, 'fraccion ' + frac);
+    assert.ok((top + bot) / 2 < 0, 'centro del ciclista bajo el centro de la zona libre');
+  }
+});
+
+test('smoothHeading: constante 0,6 s, camino corto por el cruce de +-pi, sin saltos', () => {
+  const h = I.smoothHeading(0, Math.PI / 2, 0.6, 0.6);
+  assert.ok(Math.abs(h - (Math.PI / 2) * (1 - Math.exp(-1))) < 1e-9);
+  const w = I.smoothHeading(170 * DEGR, -170 * DEGR, 0.1, 0.6);   // 20 grados por el lado corto
+  assert.ok(Math.abs(I.wrapPi(w - 170 * DEGR)) < 20 * DEGR && I.wrapPi(w - 170 * DEGR) > 0);
+  assert.strictEqual(I.smoothHeading(1, 2, 0, 0.6), 1);
+  let a = 0;
+  for (let i = 0; i < 600; i++) a = I.smoothHeading(a, Math.PI / 2, 1 / 60, 0.6);
+  assert.ok(Math.abs(a - Math.PI / 2) < 1e-3);
+});
+
+test('occlusionScale: libre = 1; bloqueo acerca la camara; nunca menos del minimo', () => {
+  const rider = { x: 0, y: 1, z: 0 }, cam = { x: -10, y: 3, z: 0 };
+  assert.strictEqual(I.occlusionScale(rider, cam, () => false, 10), 1);
+  const s = I.occlusionScale(rider, cam, (x) => x < -5, 10);
+  assert.ok(s < 0.6 && s >= I.CHASE.minScale, 'escala ' + s);
+  assert.strictEqual(I.occlusionScale(rider, cam, () => true, 10), I.CHASE.minScale);
+});
+
+test('labelVisibility: usuario, fantasma y solo los 4 bots mas cercanos', () => {
+  const riders = [{ kind: 'user', d: 0 }, { kind: 'ghost', d: 90 }];
+  for (let i = 0; i < 20; i++) riders.push({ kind: 'bot', d: 100 - i });   // el ultimo es el mas cercano
+  const v = I.labelVisibility(riders, 4);
+  assert.ok(v[0] && v[1]);
+  const bots = v.slice(2);
+  assert.strictEqual(bots.filter(Boolean).length, 4);
+  assert.deepStrictEqual(bots.slice(-4), [true, true, true, true]);
+  assert.strictEqual(I.labelVisibility([{ kind: 'bot', d: 1 }, { kind: 'bot', d: 1 }], 1).filter(Boolean).length, 1);
+});
+
+test('modos de camara: Cerca primero, conserva lateral y aerea', () => {
+  assert.strictEqual(I.CAMERA_MODES[0], 'cerca');
+  for (const m of ['persecucion', 'aerea', 'lateral']) assert.ok(I.CAMERA_MODES.includes(m));
+});
+
+test('mergeParts: normales finitas y unitarias (incluye escala no uniforme y sin normales), indices desplazados', () => {
+  const identity = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+  // escala (2, 1, 1) + traslacion (5, 0, 0), columna-mayor
+  const scaled = [2, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 5, 0, 0, 1];
+  const tri = { pos: [0, 0, 0, 1, 0, 0, 0, 1, 0], nor: [0, 0, 1, 0, 0, 1, 0, 0, 1], index: [0, 1, 2], color: [0.1, 0.2, 0.3], m: identity };
+  const slab = { pos: [0, 0, 0, 1, 0, 0, 0, 1, 0], nor: [1, 1, 0, 1, 1, 0, 1, 1, 0], index: null, color: [1, 0, 0], m: scaled };
+  const noNor = { pos: [0, 0, 0, 1, 0, 0, 0, 1, 0], nor: null, index: [2, 1, 0], color: [0, 1, 0], m: identity };
+  const g = I.mergeParts([tri, slab, noNor]);
+  assert.strictEqual(g.position.length, 27);
+  for (const arr of [g.position, g.normal, g.color]) for (const v of arr) assert.ok(Number.isFinite(v));
+  for (let i = 0; i < 9; i++) {
+    const l = Math.hypot(g.normal[i * 3], g.normal[i * 3 + 1], g.normal[i * 3 + 2]);
+    assert.ok(Math.abs(l - 1) < 1e-6, 'normal unitaria ' + l);
+  }
+  // normal (1,1,0) con escala x2: la inversa transpuesta la inclina hacia y -> (1/2, 1, 0) normalizada
+  const n = [g.normal[9], g.normal[10], g.normal[11]];
+  assert.ok(Math.abs(n[0] - 0.5 / Math.hypot(0.5, 1)) < 1e-6 && Math.abs(n[1] - 1 / Math.hypot(0.5, 1)) < 1e-6);
+  assert.ok(Math.abs(g.position[12] - 7) < 1e-6, 'x = 2*1 + 5');
+  assert.deepStrictEqual(Array.from(g.index), [0, 1, 2, 3, 4, 5, 8, 7, 6]);
+  assert.deepStrictEqual(Array.from(g.color.slice(0, 3)).map((v) => Math.round(v * 10)), [1, 2, 3]);
+});
+
+test('camara Cerca con 28 % reservado: rueda trasera dentro de la zona libre en subida de 6 % con viewH 650', () => {
+  const viewH = 650, reserve = I.chaseReserve(viewH), free = viewH - reserve, fov = 55;
+  assert.ok(reserve / viewH >= 0.27);
+  const grade = 0.06;
+  const back = I.chaseBackDistance(viewH, free, fov);
+  const c = I.chaseCamera({ x: 0, y: 0, z: 0, heading: 0, grade }, { back });
+  const cam = { x: c.x, y: c.y, z: c.z }, look = { x: c.lx, y: c.ly, z: c.lz };
+  // la altura del camino bajo la rueda trasera (1 m atras) es -grade
+  const wheelNdc = I.ndcY(cam, look, { x: -0.5, y: -0.5 * grade, z: 0 }, fov);
+  const px = free / 2 - wheelNdc * viewH / 2;            // y en pantalla (0 = arriba) con el centro optico en el centro de la zona libre
+  assert.ok(px < free - 8, 'rueda en y=' + px + ' de ' + free);
+  const headNdc = I.ndcY(cam, look, { x: 0, y: 1.75, z: 0 }, fov);
+  assert.ok(free / 2 - headNdc * viewH / 2 > 0, 'cabeza dentro');
+});
