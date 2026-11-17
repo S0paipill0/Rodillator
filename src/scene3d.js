@@ -30,7 +30,7 @@
   // Camara "Cerca": detras y apenas sobre el ciclista (tipo videojuego)
   var CHASE = {
     back: 5, backMin: 4.5, backMax: 7, height: 2.4, aheadM: 9, lookUp: 1.1,
-    fovDesktop: 55, fovPortrait: 62, headingTau: 0.6, riderH: 1.75, targetFrac: 0.35, minScale: 0.45
+    fovDesktop: 55, fovPortrait: 62, headingTau: 0.6, riderH: 1.75, targetFrac: 0.33, minScale: 0.45
   };
   var LABEL_NEAR_BOTS = 4;       // etiquetas visibles: usuario + fantasma + los 4 bots mas cercanos a la camara
 
@@ -2756,7 +2756,13 @@
       return _rq2.d > 7.5;
     }
 
-    function updateCamera(dt) {
+    var camLastMs = 0;
+    function updateCamera(simDt) {
+      // la camara sigue al ciclista, que avanza en tiempo real: usa el reloj de pared (acotado) para no quedarse atras con fps bajos
+      var nowMs = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+      var dt = camLastMs ? clamp((nowMs - camLastMs) / 1000, 0, 0.5) : simDt;
+      camLastMs = nowMs;
+      if (dt < simDt) dt = simDt;
       var u = userState(), px, py, pz, hx, hz, d;
       if (u) {
         px = u.root.position.x; py = u.root.position.y; pz = u.root.position.z; hx = u.hx; hz = u.hz; d = u.distM;
@@ -2770,7 +2776,7 @@
       } else if (cameraMode === 'lateral') {
         // 9 m a la derecha del rumbo; la zona libre (setViewInsets) deja el ciclista fuera de la columna de botones
         wantPos.set(px - hz * 9, py + 1.9, pz + hx * 9);
-        wantLook.set(px + hx * 2, py + 1, pz + hz * 2);
+        wantLook.set(px + hx * 0.3, py + 1, pz + hz * 0.3);        // al ciclista (centro de la zona libre): antes quedaba bajo la columna de botones
       } else if (chase) {
         var th = Math.atan2(hz, hx);
         if (!camHeadReady) { camHead = th; camHeadReady = true; } else camHead = smoothHeading(camHead, th, dt, CHASE.headingTau);
@@ -2818,12 +2824,20 @@
     var viewW = 640, viewH = 360;
     // Vista compacta (celular vertical u horizontal bajo): mismo criterio para camara, FOV y etiquetas.
     function compactView() { return viewW / viewH < PORTRAIT_ASPECT || viewH <= COMPACT_MAX_H; }
-    function chaseView() { return { freeH: Math.max(50, viewH - viewInsets.top - viewInsets.bottom) }; }
+    // Escritorio: el HUD no informa insets; la camara Cerca reserva ~20 % inferior (tarjetas de datos y perfil) para el ciclista
+    function effInsets() {
+      var i = viewInsets;
+      if ((cameraMode === 'cerca' || cameraMode === 'persecucion') && !(i.top || i.bottom || i.left || i.right)) {
+        return { top: 0, bottom: Math.round(viewH * 0.2), left: 0, right: 0 };
+      }
+      return i;
+    }
+    function chaseView() { var i = effInsets(); return { freeH: Math.max(50, viewH - i.top - i.bottom) }; }
     function applyProjection() {
       camera.aspect = viewW / viewH;
       var chaseCam = cameraMode === 'cerca' || cameraMode === 'persecucion';
       camera.fov = chaseCam ? (compactView() ? CHASE.fovPortrait : CHASE.fovDesktop) : (compactView() ? PORTRAIT_FOV : BASE_FOV);
-      var o = viewOffsetFor(viewW, viewH, viewInsets);
+      var o = viewOffsetFor(viewW, viewH, effInsets());
       if (o.x !== 0 || o.y !== 0) camera.setViewOffset(viewW, viewH, o.x, o.y, viewW, viewH);
       else camera.clearViewOffset();
       camera.updateProjectionMatrix();
@@ -2925,6 +2939,11 @@
         meshesPerRider: cyc.tpl ? cyc.tpl.meshes : 0, trianglesPerRider: cyc.tpl ? Math.round(cyc.tpl.triangles) : 0
       };
     }
+    function cameraStats() {
+      var u = userState(), d = u ? camera.position.distanceTo(u.root.position) : 0;
+      return { mode: cameraMode, fov: camera.fov, occScale: Math.round(occScale * 100) / 100, distToUser: Math.round(d * 10) / 10, heading: Math.round(camHead * 100) / 100,
+        cam: [camera.position.x, camera.position.y, camera.position.z].map(Math.round), user: u ? [u.root.position.x, u.root.position.y, u.root.position.z].map(Math.round) : null, hx: u ? u.hx : 0, hz: u ? u.hz : 0, blend: camBlend };
+    }
     function getStats() {
       var info = renderer.info.render;
       return {
@@ -2933,7 +2952,7 @@
         totalDrawCalls: info.calls + shadowPass.calls,
         instances: instanceCount(), quality: level, mode: qualityMode,
         hiTiles: hiTiles.size, vegChunks: vegLayer.map.size, grassChunks: grassLayer.map.size, landcover: lc.synthetic ? 'sintetica' : 'ruta',
-        cyclist: cyclistStats()
+        cyclist: cyclistStats(), camera: cameraStats()
       };
     }
 
@@ -2980,14 +2999,14 @@
         // etiqueta: tamano aparente constante a partir de 16 m de la camara
         var lx = p.x - cx, ly = p.y - cy, lz = p.z - cz;
         var s = Math.sqrt(lx * lx + ly * ly + lz * lz) / 16;
-        var ls = s < 0.4 ? 0.4 : s;                                   // camara cercana (5 m): etiqueta reducida, mismo tamano aparente
+        var ls = s < 0.3 ? 0.3 : s;                                   // camara cercana (5 m): etiqueta reducida, mismo tamano aparente
         if (s < 1) s = 1;
         st.label.scale.set(st.labelW * ls, st.labelW * ls / 4, 1);
         st.label.position.y = 2.3 + 0.6 * (s - 1);
         var vis = lv[i];
-        if (portrait && uSt && st !== uSt) {
+        if (portrait && uSt) {
           // vista compacta: etiquetas mas chicas; el fantasma, un "PB" minimo, oculto si va pegado por detras del usuario
-          if (st.kind === 'ghost' && uSt.distM - st.distM >= 0 && uSt.distM - st.distM < 15) vis = false;
+          if (st !== uSt && st.kind === 'ghost' && uSt.distM - st.distM >= 0 && uSt.distM - st.distM < 15) vis = false;
           if (vis) st.label.scale.multiplyScalar(st.kind === 'ghost' ? 0.55 : 0.7);
         }
         if (st.label.visible !== vis) st.label.visible = vis;
