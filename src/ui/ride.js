@@ -9,9 +9,10 @@
   const MINUS = '−';
   const ACCENT = '#FF5A1F', GHOST = '#FFD23F', BOT = '#7FA7C9';
   const CAMERAS = [
-    { id: 'persecucion', label: 'Persecución', short: 'Persec.' },
+    { id: 'cerca', label: 'Cerca', short: 'Cerca' },
     { id: 'aerea', label: 'Aérea', short: 'Aérea' },
     { id: 'lateral', label: 'Lateral', short: 'Lateral' },
+    { id: 'lejos', label: 'Lejos', short: 'Lejos' },
   ];
   const RPE_SCALE = [
     { n: 1, label: 'Muy fácil', desc: 'Podrías conversar sin problema durante horas.' },
@@ -634,7 +635,7 @@
       routeId: params.routeId || null,
       ghost: true,
       bots: botsCountOf(settings.botsCount),
-      camera: 'persecucion',
+      camera: 'cerca',
     };
     if (!params.workoutId && !params.routeId) {
       const today = L.pickTodayWorkout(state0.plan, L.ymd());
