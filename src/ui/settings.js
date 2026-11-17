@@ -27,7 +27,7 @@
       var grid = el('div', { 'class': 'set-grid' });
       container.appendChild(grid);
 
-      function rerender() { container.textContent = ''; unsubs.splice(0).forEach(function (u) { u(); }); settingsView.render(container, ctx); }
+      function rerender() { container.textContent = ''; unsubs.splice(0).forEach(function (u) { try { u(); } catch (e) { /* una baja fallida no impide redibujar */ } }); settingsView.render(container, ctx); }
 
       if (profile) {
         grid.appendChild(profileCard());

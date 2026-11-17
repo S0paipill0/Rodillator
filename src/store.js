@@ -76,7 +76,8 @@
     out.coach = normalizeCoach(out.coach, migrate);
     out.graphicsQuality = normalizeGraphicsQuality(out.graphicsQuality);
     out.lastTimed = normalizeLastTimed(out.lastTimed);
-    out.botsCount = normalizeBotsCount(out.botsCount);
+    // migración: 6 era el valor de fábrica anterior -> 14 (nuevo); otros valores < 8 -> 8
+    out.botsCount = Number(out.botsCount) === 6 ? BOTS_DEFAULT : normalizeBotsCount(out.botsCount);
     out.hydration = normalizeHydration(out.hydration);
     return out;
   }

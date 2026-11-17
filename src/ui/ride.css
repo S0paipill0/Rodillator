@@ -329,13 +329,15 @@
 .rd--ghost .rd-alerts { top: 168px; }
 .rd-alert { display: flex; align-items: baseline; gap: 12px; max-width: 100%; padding: 8px 18px; border-radius: 14px; background: rgba(13, 19, 25, .88); border: 2px solid var(--rd-behind); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); white-space: nowrap; overflow: hidden; }
 .rd-alert[hidden] { display: none; }
-.rd-alert b { font-family: var(--rd-num); font-weight: 800; font-size: 30px; line-height: 1.05; }
+.rd-alert b { font-family: var(--rd-num); font-weight: 800; font-size: 30px; line-height: 1.05; min-width: 0; flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; }
+.rd-alert span { flex: none; }
 .rd-alert span { font-size: 15px; font-weight: 600; font-variant-numeric: tabular-nums; overflow: hidden; text-overflow: ellipsis; }
 .rd-alert--attack b { color: var(--rd-behind); }
 .rd-alert--hydrate { border-color: #3FA7D6; }
 .rd-alert--hydrate b { color: #3FA7D6; }
 .rd--ghost.has-alert .rd-msg { top: max(27%, 250px); }
-@media (max-width: 900px) { .rd--ghost .rd-alerts { top: 14px; } .rd--ghost.has-alert .rd-msg { top: 27%; } }
+.has-alert-2 .rd-msg, .rd--ghost.has-alert-2 .rd-msg { top: max(27%, 300px); }
+@media (max-width: 900px) { .rd--ghost .rd-alerts { top: 14px; } .rd--ghost.has-alert .rd-msg { top: 27%; } .has-alert-2 .rd-msg, .rd--ghost.has-alert-2 .rd-msg { top: max(27%, 200px); } }
 
 /* celular: el nivel va en una columna a la izquierda (la de controles está a la derecha) */
 @media (max-width: 700px), (max-height: 500px) {
@@ -356,6 +358,7 @@
   .rd-alert b { font-size: 18px; }
   .rd-alert span { font-size: 12px; }
   .has-alert .rd-msg, .rd--ghost.has-alert .rd-msg { top: calc(var(--rd-top-h) + 98px); }
+  .has-alert-2 .rd-msg, .rd--ghost.has-alert-2 .rd-msg { top: calc(var(--rd-top-h) + 134px); }
   /* con banda de pulso la FC pasa a la fila visible (en lugar de la pendiente) */
   .has-hr .rd-m--hr { display: block; }
   .has-hr:not(.is-more) .rd-m--grade { display: none; }
@@ -366,5 +369,6 @@
   .rd-lvl-b { width: 36px; height: 36px; }
   .rd-alerts, .rd--ghost .rd-alerts { top: calc(var(--rd-top-h) + 6px); max-width: calc(100% - 360px); }
   .has-alert .rd-msg, .rd--ghost.has-alert .rd-msg { top: calc(var(--rd-top-h) + 44px); }
+  .has-alert-2 .rd-msg, .rd--ghost.has-alert-2 .rd-msg { top: calc(var(--rd-top-h) + 80px); }
 }
 @media (prefers-reduced-motion: reduce) { .rd-lvl { transition: none; } }

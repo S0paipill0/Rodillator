@@ -10,6 +10,7 @@ require('../src/routes.js');
 require('../src/training.js');
 require('../src/trainer.js');
 require('../src/riders.js');
+require('../src/coach.js');
 require('../src/ui/ride.js');
 const R = globalThis.R;
 const L = R.rideLogic;
@@ -247,7 +248,10 @@ test('store: normaliza botsCount, hydration, trainer y sensors (y migra estados 
   // estado antiguo: botsCount 6, sin hydration/trainer/sensors
   S.importJSON(JSON.stringify({ schemaVersion: 1, settings: { botsCount: 6, ghostBoost: 1 } }));
   let st = S.get().settings;
-  assert.strictEqual(st.botsCount, 8, 'menor que 8 sube a 8');
+  assert.strictEqual(st.botsCount, 14, '6 (antiguo valor de fábrica) migra a 14');
+  S.importJSON(JSON.stringify({ schemaVersion: 1, settings: { botsCount: 7 } }));
+  assert.strictEqual(S.get().settings.botsCount, 8, 'otros valores menores que 8 suben a 8');
+  S.importJSON(JSON.stringify({ schemaVersion: 1, settings: { botsCount: 6, ghostBoost: 1 } }));
   assert.deepStrictEqual(st.hydration, { enabled: true, everyMin: 12, durationS: 45 });
   assert.deepStrictEqual(st.trainer, { type: 'mecanico-8', wheelCircMm: 2050, flatLevel: 3, powerScale: 1 });
   assert.deepStrictEqual(st.sensors, { lastSpeedId: null, lastHrId: null });
@@ -285,10 +289,38 @@ test('store: carga desde localStorage un estado guardado antes de la ola R3', ()
   try {
     const st = R.store.load().settings;
     assert.strictEqual(st.reminderTime, '07:00');
-    assert.strictEqual(st.botsCount, 8);
+    assert.strictEqual(st.botsCount, 14);
     assert.strictEqual(st.coach.volume, 1.6);
     assert.strictEqual(st.hydration.enabled, true);
     assert.strictEqual(st.trainer.flatLevel, 3);
     assert.strictEqual(st.sensors.lastSpeedId, null);
   } finally { delete globalThis.localStorage; R.store.reset(); }
+});
+
+test('readings: rodillo FTMS o medidor de potencia conectado -> su potencia real manda', () => {
+  const L = R.rideLogic;
+  const st = (kind, extra) => [Object.assign({ kind, state: 'connected' }, extra)];
+  let r = L.readings({ sim: { powerW: 120 }, dev: { powerW: 205, cadenceRpm: 88, speedKph: 30 }, status: st('trainer'), level: 3, powerScale: 1 });
+  assert.strictEqual(r.powerW, 205); assert.strictEqual(r.powerSource, 'device'); assert.strictEqual(r.cad, 88);
+  r = L.readings({ sim: { powerW: 120 }, dev: { powerW: 230 }, status: st('powermeter').concat(st('csc', { mode: 'speed' })), level: 3, powerScale: 1 });
+  assert.strictEqual(r.powerW, 230, 'gana al CSC virtual'); assert.strictEqual(r.powerSource, 'device');
+  // conectado pero aún sin dato de potencia: cae al comportamiento anterior
+  r = L.readings({ sim: { powerW: 120 }, dev: {}, status: st('trainer'), level: 3, powerScale: 1 });
+  assert.strictEqual(r.powerSource, 'sim');
+});
+
+test('coach: el paso de hidratación no dice "¡Recupera!" (queda solo el aviso de hidratación)', () => {
+  const spoken = [];
+  const c = R.coach.createCoach({ say: (t) => spoken.push(t), beep: () => {}, now: () => 0, verbosity: 'completo' });
+  const wk = { id: 'x', durationS: 400, steps: [
+    { durationS: 200, powerPct: 90, label: 'a' },
+    { durationS: 60, powerPct: 50, label: 'Hidratación', hydrate: true },
+    { durationS: 140, powerPct: 90, label: 'b' }] };
+  const base = { mode: 'workout', workout: wk, ftp: 200, paused: false, distM: 0, routeLenM: 0, speedMps: 0, intensity: 1, workoutRemainingS: 300, powerW: 0, gradePct: 0 };
+  c.update(Object.assign({ tS: 1, stepIndex: 0, stepElapsedS: 1, stepRemainingS: 199, targetW: 180 }, base));
+  c.update(Object.assign({ tS: 201, stepIndex: 1, stepElapsedS: 1, stepRemainingS: 59, targetW: 100 }, base));
+  c.event('hydrate', { durationS: 60 });
+  const all = spoken.join(' | ');
+  assert.ok(!/Recupera/.test(all), all);
+  assert.ok(/Hidrataci/.test(all), all);
 });

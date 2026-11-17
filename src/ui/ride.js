@@ -323,10 +323,17 @@
     const sim = (o && o.sim) || {}, dev = (o && o.dev) || {};
     const on = (kind) => ((o && o.status) || []).filter((x) => x && x.kind === kind && x.state === 'connected')[0] || null;
     const csc = on('csc'), hrDev = on('hr');
+    const pwrDev = on('trainer') || on('powermeter');
     const cscSpeed = !!csc && csc.mode !== 'cadence';
     const num = (v) => (v != null && isFinite(v) ? Number(v) : null);
     const out = { powerW: 0, hr: null, cad: null, wheelKph: null, powerSource: 'sim', hrSource: null };
-    if (cscSpeed) {
+    if (pwrDev && num(dev.powerW) != null) {
+      // rodillo FTMS o medidor de potencia: su potencia real manda sobre la virtual/simulada
+      out.powerW = Math.max(0, num(dev.powerW));
+      out.powerSource = 'device';
+      out.wheelKph = cscSpeed ? num(dev.speedKph) : null;
+      out.cad = num(dev.cadenceRpm);
+    } else if (cscSpeed) {
       out.wheelKph = num(dev.speedKph);
       out.powerW = virtualPower({ speedKph: out.wheelKph, level: o.level, powerScale: o.powerScale });
       out.powerSource = 'csc';
@@ -336,7 +343,7 @@
       out.cad = csc ? num(dev.cadenceRpm) : num(sim.cadenceRpm);
     }
     if (hrDev) { out.hr = num(dev.hrBpm); out.hrSource = 'hr'; }
-    else if (!csc) { out.hr = num(sim.hrBpm); out.hrSource = out.hr != null ? 'sim' : null; }
+    else if (!csc && !pwrDev) { out.hr = num(sim.hrBpm); out.hrSource = out.hr != null ? 'sim' : null; }
     return out;
   }
 
@@ -799,7 +806,7 @@
         h('p', { class: 'rd-note', text: cfg.tab === 'workout' || isTimedMode()
           ? 'El simulador sigue solo la potencia objetivo de cada paso. Ajusta la intensidad con las flechas ↑ ↓ (±5 %) o con los botones − y +.'
           : 'Fija tu potencia con las flechas ↑ ↓ (±10 W), con los botones − y + o con el deslizador; la velocidad sale de la física según la pendiente.' }),
-        h('p', { class: 'rd-note', text: 'Con el sensor de velocidad conectado (Ajustes › Sensores y rodillo), la potencia se estima con la velocidad de tu rueda y el nivel de la palanca. La app te sugiere el nivel (1 a 8); si no lo sigues, márcalo con − y + junto al nivel.' }),
+        h('p', { class: 'rd-note', text: 'Con el sensor de velocidad conectado (Ajustes › Sensores y rodillo), la potencia se estima con la velocidad de tu rueda y el nivel de la palanca. La app te sugiere el nivel (1 a 8); si no lo sigues, márcalo con − y + junto al nivel. La app sugiere el nivel; si no moviste la palanca, corrígelo con − / +.' }),
       ]));
 
       // --- opciones
@@ -980,8 +987,6 @@
         // el modo del CSC (velocidad/cadencia) se conoce con el primer paquete: llega como 'cscMode', no como 'status'
         ride.unsubs.push(R.devices.on('cscMode', () => { mine.devStatus = R.devices.status ? R.devices.status() : mine.devStatus; }));
       }
-      noteBluetooth();
-
       // simulador: respaldo sin sensores (y objetivo ERG de los entrenamientos)
       sim = R.devices.createSimulator({ ftp, maxHr: (profile && profile.maxHr) || undefined, massKg });
       sim.setTargetPower(workout ? R.training.targetPowerAt(workout, 0, ftp).watts : ride.simTarget);
@@ -998,6 +1003,7 @@
 
       phase = 'countdown';
       buildStage();
+      noteBluetooth(); // después de buildStage(): este vacía root
       requestWake();
       runCountdown(3);
     }
@@ -1044,7 +1050,7 @@
       root.appendChild(sceneEl);
       root.classList.toggle('rd--wk', !!ride.workout);
       root.classList.toggle('rd--ghost', !!ride.ghost);
-      root.classList.remove('has-hr', 'has-alert');
+      root.classList.remove('has-hr', 'has-alert', 'has-alert-2'); root._hasAlert2 = false;
       root._hasHr = false; root._hasAlert = false; root._sensor = false; root.classList.remove('is-sensor');
       root.classList.toggle('is-more', moreOpen);
       // doble toque sobre la vista 3D = cambiar de cámara
@@ -1348,7 +1354,8 @@
         // rodada libre con el simulador: pedaleo suave durante la pausa
         if (!tp && sim && r.powerSource === 'sim') { r.simBeforeHyd = sim.getTargetPower(); sim.setTargetPower(Math.round(0.5 * ftp)); }
       } else if (!st.active && was) {
-        if (r.simBeforeHyd != null && sim) sim.setTargetPower(r.simBeforeHyd);
+        // solo si el objetivo sigue siendo el de la pausa (si el usuario lo cambió, se respeta)
+        if (r.simBeforeHyd != null && sim && sim.getTargetPower() === Math.round(0.5 * ftp)) sim.setTargetPower(r.simBeforeHyd);
         r.simBeforeHyd = null;
       }
     }
@@ -1394,7 +1401,7 @@
         const nx = r.workout.steps[tp.stepIndex + 1];
         setText(S.tNext, nx ? 'Sigue: ' + (nx.label || 'siguiente paso') + ' ' + Math.round(nx.powerPct * ftp / 100 * r.intensity) + ' W' : 'Último paso');
         setText(S.adj, Math.round(r.intensity * 100) + ' %');
-      } else if (r.powerSource === 'csc') {
+      } else if (r.powerSource === 'csc' || r.powerSource === 'device') {
         setText(S.adj, 'Sensor'); // la potencia sale de la rueda: el objetivo del simulador no se usa
       } else if (sim) {
         const tw = sim.getTargetPower();
@@ -1419,7 +1426,7 @@
         S.mHr.el._z = hz ? hz.zone : 0;
         S.mHr.el.title = hz ? 'Zona ' + hz.zone + ' de FC (' + hz.name + ')' : '';
       }
-      const sensorPower = r.powerSource === 'csc' && !r.workout;
+      const sensorPower = (r.powerSource === 'csc' || r.powerSource === 'device') && !r.workout;
       if (root._sensor !== sensorPower) { root._sensor = sensorPower; root.classList.toggle('is-sensor', sensorPower); }
       if (root._hasHr !== (r.hrSource === 'hr')) { root._hasHr = r.hrSource === 'hr'; root.classList.toggle('has-hr', root._hasHr); }
       updateLevel(nowMs);
@@ -1491,6 +1498,8 @@
       }
       const any = atkOn || hydOn;
       if (root._hasAlert !== any) { root._hasAlert = any; root.classList.toggle('has-alert', any); }
+      const two = atkOn && hydOn;
+      if (root._hasAlert2 !== two) { root._hasAlert2 = two; root.classList.toggle('has-alert-2', two); }
     }
 
     function drawProfile(list) {
