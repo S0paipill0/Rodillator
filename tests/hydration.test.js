@@ -11,7 +11,7 @@ function analyze(orig, w) {
   const pauses = [];
   let t = 0, tOrig = 0;
   w.steps.forEach((s, i) => {
-    if (s.hydrate) pauses.push({ at: tOrig, prev: w.steps[i - 1], next: w.steps[i + 1], idx: i });
+    if (s.hydrate && !s.hydrateInPlace) pauses.push({ at: tOrig, prev: w.steps[i - 1], next: w.steps[i + 1], idx: i });
     else tOrig += s.durationS;
     t += s.durationS;
   });
@@ -32,7 +32,7 @@ function checkInvariants(orig, w, every = 12, dur = 45) {
     assert.deepStrictEqual([pause.durationS, pause.powerPct, pause.label, pause.hydrate], [dur, 50, 'Hidratación', true]);
   });
   // los pasos no pausa suman lo mismo por categoría de potencia (la partición de pasos suaves conserva el total)
-  const sum = (steps) => steps.filter((s) => !s.hydrate).reduce((a, s) => a + s.durationS * (s.powerPct + (s.powerPctEnd != null ? s.powerPctEnd : s.powerPct)), 0);
+  const sum = (steps) => steps.filter((s) => !s.hydrate || s.hydrateInPlace).reduce((a, s) => a + s.durationS * (s.powerPct + (s.powerPctEnd != null ? s.powerPctEnd : s.powerPct)), 0);
   const so = sum(orig.steps), sn = sum(w.steps);
   assert.ok(Math.abs(so - sn) / so < 1e-3, 'energía conservada');
   // separación entre pausas ~ every min (no mucho menos)
@@ -49,13 +49,15 @@ test('no muta el entrenamiento original', () => {
   assert.ok(w.durationS > o.durationS);
 });
 
-test('sweet spot 3x12: pausas tras cada bloque intenso, nunca dentro', () => {
+test('sweet spot 3x12: pausa real entre bloques y avisos en el sitio dentro de ellos', () => {
   const o = T.getWorkout('sweetspot-3x12');
   const w = T.withHydration(o, { everyMin: 12, durationS: 45 });
   const pauses = checkInvariants(o, w);
-  assert.deepStrictEqual(pauses.map((p) => p.at), [22 * 60, 39 * 60, 56 * 60]);
-  pauses.forEach((p) => { assert.ok(inten(p.prev)); assert.ok(!inten(p.next)); });
-  assert.strictEqual(w.durationS, o.durationS + 3 * 45);
+  assert.strictEqual(pauses.length, 1);
+  assert.strictEqual(w.hydration.inPlace, 3);
+  assert.strictEqual(w.durationS, o.durationS + 45);
+  // los avisos en el sitio conservan la potencia del bloque
+  w.steps.forEach((s, i) => { if (s.hydrateInPlace) assert.strictEqual(s.powerPct, 90); });
 });
 
 test('umbral 2x20 con ventanas de 10, 12 y 15 min', () => {
@@ -65,9 +67,9 @@ test('umbral 2x20 con ventanas de 10, 12 y 15 min', () => {
     const pauses = checkInvariants(o, w, e);
     assert.ok(pauses.length >= 2, 'every ' + e);
     pauses.forEach((p) => assert.ok(!inten(p.next) || !inten(p.prev)));
-    // ningún paso intenso fue partido: mismos pasos intensos que el original
-    const oi = o.steps.filter(inten).map((s) => s.durationS), ni = w.steps.filter(inten).map((s) => s.durationS);
-    assert.deepStrictEqual(ni, oi);
+    // el trabajo intenso total se conserva (los avisos en el sitio parten el bloque pero no lo acortan)
+    const tot = (st) => st.filter((s) => inten(s) && (!s.hydrate || s.hydrateInPlace)).reduce((a, s) => a + s.durationS, 0);
+    assert.strictEqual(tot(w.steps), tot(o.steps));
   });
 });
 
@@ -84,7 +86,7 @@ test('timedWorkout de 60 min', () => {
   const o = T.timedWorkout({ durationMin: 60, focus: 'sweetspot', today: '2026-11-16', activities: [] });
   const w = T.withHydration(o, { everyMin: 12, durationS: 45 });
   const pauses = checkInvariants(o, w);
-  assert.ok(pauses.length >= 3);
+  assert.ok(pauses.length + w.hydration.inPlace >= 3);
   const w2 = T.withHydration(o, { everyMin: 15, durationS: 30 });
   checkInvariants(o, w2, 15, 30);
 });
@@ -94,9 +96,10 @@ test('toda la biblioteca cumple las reglas (con 10, 12 y 15 min)', () => {
     [10, 12, 15].forEach((e) => {
       const w = T.withHydration(o, { everyMin: e, durationS: 45 });
       checkInvariants(o, w, e);
-      // ningún paso >= 106 % ni intenso fue partido
+      // ningún paso >= 106 % fue partido ni alterado
       const key = (s) => s.durationS + '/' + s.powerPct + '/' + s.powerPctEnd;
-      const oi = o.steps.filter(inten).map(key), ni = w.steps.filter((s) => !s.hydrate && inten(s)).map(key);
+      const vo2 = (s) => Math.max(s.powerPct, s.powerPctEnd != null ? s.powerPctEnd : 0) >= 106;
+      const oi = o.steps.filter(vo2).map(key), ni = w.steps.filter((s) => !s.hydrate && vo2(s)).map(key);
       assert.deepStrictEqual(ni, oi, o.id);
     });
   });
@@ -140,4 +143,38 @@ test('series on/off cortas: la pausa va tras la recuperación corta, no pegada a
     if (inten(p.next)) assert.ok(!inten(p.prev) && p.prev.durationS === 20 && w.steps[p.idx - 2].powerPct === 120);
   });
   assert.ok(pauses.some((p) => inten(p.next)), 'alguna pausa cae dentro de la serie');
+});
+
+// ---- avisos en el sitio (hydrateInPlace) y separación máxima entre pausas/avisos
+function maxGapMin(w) {
+  let t = 0, last = 0, mx = 0;
+  w.steps.forEach((s) => { if (s.hydrate) { mx = Math.max(mx, t - last); last = t + s.durationS; } t += s.durationS; });
+  return Math.max(mx, t - last) / 60;
+}
+const lib = Array.isArray(T.library) ? T.library : Object.values(T.library);
+
+test('avisos en el sitio: misma potencia, no suman tiempo y solo bajo 106 % FTP', () => {
+  lib.filter((o) => o.category !== 'test').forEach((o) => {
+    const w = T.withHydration(o, { everyMin: 12, durationS: 45 });
+    w.steps.filter((s) => s.hydrateInPlace).forEach((s, i, arr) => {
+      assert.ok(s.hydrate && s.label === 'Hidratación' && s.powerPct >= 88 && s.powerPct < 106, o.id);
+    });
+    const real = w.steps.filter((s) => s.hydrate && !s.hydrateInPlace).length;
+    assert.strictEqual(w.durationS, o.durationS + real * 45, o.id);
+    assert.strictEqual(w.hydration.count, real);
+  });
+});
+
+test('nunca más de 18 min entre pausas/avisos (rutinas de la biblioteca, 10/12/15 min)', () => {
+  [10, 12, 15].forEach((e) => lib.filter((o) => o.category !== 'test').forEach((o) => {
+    const g = maxGapMin(T.withHydration(o, { everyMin: e, durationS: 45 }));
+    assert.ok(g <= 19.5, o.id + ' cada ' + e + ': ' + g.toFixed(1) + ' min');
+  }));
+});
+
+test('timedWorkout 15–150 min: separación máxima entre pausas/avisos', () => {
+  for (let m = 15; m <= 150; m += 5) {
+    const w = T.withHydration(T.timedWorkout({ durationMin: m, today: '2026-06-10' }), { everyMin: 12, durationS: 45 });
+    assert.ok(maxGapMin(w) <= 18, m + ' min: ' + maxGapMin(w).toFixed(1));
+  }
 });
