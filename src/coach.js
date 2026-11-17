@@ -119,7 +119,9 @@
         if (before) {
           var up = step.powerPct - endPct(before);
           beep('go');
-          if (Math.abs(up) < 10) {
+          if (step.hydrate) {
+            // la pausa de hidratación ya tiene su aviso: sin "¡Recupera!" encima
+          } else if (Math.abs(up) < 10) {
             // cambio pequeño (p. ej. escalones del test de rampa): solo pitido y, en la rampa, el vatiaje
             if (s.workout.id === 'ramp-test') speak('Siguiente escalón: ' + spokenWatts(step.powerPct, s) + ' vatios', PRI.REST);
           } else if (up > 0) speak('¡Vamos!', PRI.COUNT); else speak('¡Recupera!', PRI.COUNT);

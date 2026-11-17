@@ -309,21 +309,61 @@
     } catch (e) { /* Battery Service opcional */ }
   }
 
+  // Error interno: la conexión en curso quedó obsoleta (disconnect() u otra conexión del mismo tipo
+  // cambió la generación mientras se esperaba al dispositivo). Ya se limpió; no hay que tocar el estado.
+  function supersededError() { var e = new Error('Conexión cancelada.'); e.superseded = true; e.soft = true; return e; }
+
+  // Cierra lo que abrió un attach obsoleto sin pisar una conexión más nueva del mismo tipo.
+  function cleanupStale(kind, device, mine) {
+    var h = valueHandlers[kind];
+    if (mine && mine.ch) {
+      if (h && h.ch === mine.ch && h.fn === mine.fn) detachValue(kind);
+      else { try { mine.ch.removeEventListener('characteristicvaluechanged', mine.fn); } catch (e) { /* nada */ } }
+    }
+    var current = conns[kind];
+    if (!current || current.device !== device) {
+      if (kind === 'csc' && !current) stopWatchdog();
+      try { if (device && device.gatt && device.gatt.connected) device.gatt.disconnect(); } catch (e) { /* ya desconectado */ }
+    }
+  }
+
   // Conecta GATT, suscribe notificaciones y registra el manejo de desconexión (con reintentos).
-  async function attach(device, kind, serviceUuid, charUuid, onValue) {
+  // Tras cada espera comprueba la generación: si hubo disconnect() u otra conexión en curso, limpia
+  // (listener, vigilante, GATT) y lanza un error `superseded` en vez de dejar la conexión a medias.
+  // expectedGen: generación con la que empezó la operación (openDevice/reconnect/reintento).
+  async function attach(device, kind, serviceUuid, charUuid, onValue, expectedGen) {
+    var g = expectedGen != null ? expectedGen : gen[kind];
+    var mine = null;
+    function check() {
+      if (g !== gen[kind] || closing[kind]) { cleanupStale(kind, device, mine); throw supersededError(); }
+    }
     var server = await device.gatt.connect();
+    check();
     var service = await server.getPrimaryService(serviceUuid);
+    check();
     var ch = await service.getCharacteristic(charUuid);
+    check();
     detachValue(kind);   // nunca dos listeners sobre la misma característica tras reconectar
     var fn = function (ev) { onValue(ev.target.value); };
     ch.addEventListener('characteristicvaluechanged', fn);
-    valueHandlers[kind] = { ch: ch, fn: fn };
+    mine = { ch: ch, fn: fn };
+    valueHandlers[kind] = mine;
     await ch.startNotifications();
+    check();
     conns[kind] = { device: device, server: server, service: service, ch: ch, spec: [serviceUuid, charUuid, onValue] };
     setMeta(kind, { name: device.name || '', id: device.id || null, state: 'connected', retries: 0 });
     if (kind === 'csc') startWatchdog();
     readBattery(kind, server);
     return conns[kind];
+  }
+
+  // Limpieza tras un fallo de openDevice/reconnect: quita el listener y cierra el GATT de ese dispositivo.
+  function cleanupFailed(kind, device) {
+    if (conns[kind] && conns[kind].device !== device) return;   // otra conexión más nueva: no tocar
+    detachValue(kind);
+    try { if (device && device.gatt && device.gatt.connected) device.gatt.disconnect(); } catch (e2) { /* ya desconectado */ }
+    conns[kind] = null;
+    clearLatest(kind);
   }
 
   var wired = typeof WeakSet !== 'undefined' ? new WeakSet() : null;
@@ -351,7 +391,7 @@
       retryTimers[kind] = null;
       if (g !== gen[kind] || closing[kind] || conns[kind]) return;
       try {
-        await attach(device, kind, spec[0], spec[1], spec[2]);
+        await attach(device, kind, spec[0], spec[1], spec[2], g);
         if (g !== gen[kind]) return;
         emitter.emit('reconnected', { kind: kind });
       } catch (e) { retryConnect(device, kind, spec, attempt + 1, g); }
@@ -363,17 +403,17 @@
     if (!n || !n.bluetooth) throw new Error(MSG_BLOCKED);
     var device = null;
     closing[kind] = false;
-    bumpGen(kind);
+    var g = bumpGen(kind);
     try {
       device = await n.bluetooth.requestDevice(options);
-      await attach(device, kind, serviceUuid, charUuid, onValue);
+      if (g !== gen[kind] || closing[kind]) throw supersededError();   // disconnect() mientras se elegía
+      await attach(device, kind, serviceUuid, charUuid, onValue, g);
       wireDisconnect(device, kind);
       rememberDevice(kind, device);
       return { name: device.name || '', id: device.id || null, kind: kind, service: conns[kind].service, server: conns[kind].server };
     } catch (e) {
-      try { if (device && device.gatt && device.gatt.connected) device.gatt.disconnect(); } catch (e2) { /* ya desconectado */ }
-      conns[kind] = null;
-      clearLatest(kind);
+      if (e && e.superseded) throw e;   // attach ya limpió; el estado pertenece a la operación más nueva
+      cleanupFailed(kind, device);
       throw translateError(e);
     }
   }
@@ -414,16 +454,15 @@
     }
     if (!device) throw new Error('No se encontró el sensor. Conéctalo de nuevo.');
     closing[kind] = false;
-    bumpGen(kind);
+    var g = bumpGen(kind);
     if (kind === 'csc') { cscState = null; cscMode = null; }
     try {
-      await attach(device, kind, spec[0], spec[1], spec[2]);
+      await attach(device, kind, spec[0], spec[1], spec[2], g);
       wireDisconnect(device, kind);
       rememberDevice(kind, device);
     } catch (e) {
-      conns[kind] = null;
-      detachValue(kind);
-      clearLatest(kind);
+      if (e && e.superseded) throw e;
+      cleanupFailed(kind, device);
       setMeta(kind, { state: 'disconnected' });
       throw translateError(e);
     }

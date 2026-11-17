@@ -252,7 +252,8 @@
   }
 
   // Márgenes del HUD sobre la escena (px CSS, relativos a la escena) a partir de rectángulos medidos.
-  // rects: { scene:{top,bottom,left,right}, top:{bottom}|null, strip:{top}|null, controls:{left}|null }
+  // rects: { scene:{top,bottom,left,right}, top:{bottom}|null, strip:{top}|null, controls:{left}|null, level:{right}|null }
+  // level: columna del nivel del rodillo a la izquierda (celular) -> margen izquierdo.
   function computeViewInsets(rects) {
     const sc = rects && rects.scene;
     if (!sc) return { top: 0, bottom: 0, left: 0, right: 0 };
@@ -260,7 +261,7 @@
     return {
       top: rects.top ? pos(rects.top.bottom - sc.top) : 0,
       bottom: rects.strip ? pos(sc.bottom - rects.strip.top) : 0,
-      left: 0,
+      left: rects.level ? pos(rects.level.right - sc.left) : 0,
       right: rects.controls ? pos(sc.right - rects.controls.left) : 0,
     };
   }
@@ -279,7 +280,169 @@
     };
   }
 
+  // ---------- Rodillo mecánico: nivel sugerido, potencia virtual y fuentes de datos ----------
+  const LEVELS = 8;
+  const HR_MAX_DEFAULT = 186;
+  const LEVEL_WINDOW_M = 150;  // ventana de la pendiente suavizada (m)
+  const LEVEL_MIN_GAP_S = 8;   // no cambiar la sugerencia más de una vez cada 8 s
+  const LEVEL_MARGIN_PCT = 0.25; // la pendiente debe pasar el umbral por este margen (evita parpadeo)
+
+  function clampLevel(n) { n = Math.round(Number(n)); return isFinite(n) ? clamp(n, 1, LEVELS) : 3; }
+
+  // Pendiente media (%) en una ventana de windowM centrada en distM. loop = la ruta se repite (Libre /
+  // entrenamiento): se usa la posición dentro de la vuelta. En los extremos la ventana se desplaza hacia dentro.
+  function smoothedGrade(route, distM, windowM, loop) {
+    const len = route && route.distanceM;
+    if (!(len > 0)) return 0;
+    const W = Math.min(windowM > 0 ? windowM : LEVEL_WINDOW_M, len);
+    let d = Number(distM) || 0;
+    d = loop ? ((d % len) + len) % len : clamp(d, 0, len);
+    let a = d - W / 2, b = d + W / 2;
+    if (a < 0) { b -= a; a = 0; }
+    if (b > len) { a = Math.max(0, a - (b - len)); b = len; }
+    if (b - a < 1) return 0;
+    return ((R.routes.sampleAt(route, b).ele - R.routes.sampleAt(route, a).ele) / (b - a)) * 100;
+  }
+
+  // Potencia virtual (W) del rodillo mecánico a partir de la velocidad de rueda del sensor CSC.
+  function virtualPower(o) {
+    const kph = o && o.speedKph;
+    if (kph == null || !isFinite(kph) || kph <= 0) return 0;
+    const scale = o.powerScale > 0 ? o.powerScale : 1;
+    return R.trainer.powerFromSpeed({ speedKph: kph, level: clampLevel(o.level) }) * scale;
+  }
+
+  // Combina el simulador con los sensores reales.
+  //   CSC conectado en modo velocidad (o ambos): potencia virtual desde la velocidad de rueda y el nivel actual;
+  //     cadencia del CSC si trae biela (si no, null).
+  //   CSC en modo cadencia: potencia del simulador, cadencia del CSC.
+  //   Banda de pulso conectada: FC de la banda. Con algún sensor real pero sin banda: FC null (no se inventa).
+  //   Sin sensores: todo del simulador (comportamiento anterior).
+  // o = { sim, dev, status: R.devices.status(), level, powerScale }
+  function readings(o) {
+    const sim = (o && o.sim) || {}, dev = (o && o.dev) || {};
+    const on = (kind) => ((o && o.status) || []).filter((x) => x && x.kind === kind && x.state === 'connected')[0] || null;
+    const csc = on('csc'), hrDev = on('hr');
+    const pwrDev = on('trainer') || on('powermeter');
+    const cscSpeed = !!csc && csc.mode !== 'cadence';
+    const num = (v) => (v != null && isFinite(v) ? Number(v) : null);
+    const out = { powerW: 0, hr: null, cad: null, wheelKph: null, powerSource: 'sim', hrSource: null };
+    if (pwrDev && num(dev.powerW) != null) {
+      // rodillo FTMS o medidor de potencia: su potencia real manda sobre la virtual/simulada
+      out.powerW = Math.max(0, num(dev.powerW));
+      out.powerSource = 'device';
+      out.wheelKph = cscSpeed ? num(dev.speedKph) : null;
+      out.cad = num(dev.cadenceRpm);
+    } else if (cscSpeed) {
+      out.wheelKph = num(dev.speedKph);
+      out.powerW = virtualPower({ speedKph: out.wheelKph, level: o.level, powerScale: o.powerScale });
+      out.powerSource = 'csc';
+      out.cad = csc.mode === 'both' ? num(dev.cadenceRpm) : null;
+    } else {
+      out.powerW = Math.max(0, num(sim.powerW) || 0);
+      out.cad = csc ? num(dev.cadenceRpm) : num(sim.cadenceRpm);
+    }
+    if (hrDev) { out.hr = num(dev.hrBpm); out.hrSource = 'hr'; }
+    else if (!csc && !pwrDev) { out.hr = num(sim.hrBpm); out.hrSource = out.hr != null ? 'sim' : null; }
+    return out;
+  }
+
+  // Zona de FC (1..5) por % de la FC máxima: < 60, 60–70, 70–80, 80–90, ≥ 90 %.
+  const HR_ZONES = [
+    { zone: 1, name: 'Muy suave', color: '#8A8F98' },
+    { zone: 2, name: 'Suave', color: '#3FA7D6' },
+    { zone: 3, name: 'Moderada', color: '#59CD90' },
+    { zone: 4, name: 'Intensa', color: '#FAC05E' },
+    { zone: 5, name: 'Máxima', color: '#EE6352' },
+  ];
+  function hrZone(hr, maxHr) {
+    if (hr == null || !(hr > 0)) return null;
+    const max = maxHr > 0 ? maxHr : HR_MAX_DEFAULT;
+    const pct = (hr / max) * 100;
+    const z = pct < 60 ? 1 : pct < 70 ? 2 : pct < 80 ? 3 : pct < 90 ? 4 : 5;
+    return Object.assign({ pct: Math.round(pct) }, HR_ZONES[z - 1]);
+  }
+
+  // Nivel sugerido del rodillo mecánico (1..8). La app solo sugiere; el usuario mueve la palanca.
+  //   base: en rutas, levelForGrade(pendiente suavizada) desplazado por flatLevel (nivel en llano);
+  //         en entrenamientos, levelForTarget(objetivo). La pendiente debe cruzar el umbral por marginPct.
+  //   ataque del pelotón: base + 1 (tope 8); hidratación: flatLevel − 1 (mín. 1).
+  //   La sugerencia no cambia más de una vez cada minGapS segundos.
+  //   manual(±1): el usuario indica el nivel real; vale hasta la próxima sugerencia distinta.
+  // update(s) devuelve { level, prev, reason } cuando hay que mover la palanca (evento 'resistance'), o null.
+  function createLevelAdvisor(opts) {
+    const o = opts || {};
+    const flat = clampLevel(o.flatLevel != null ? o.flatLevel : 3);
+    const offset = flat - 3;
+    const minGapS = o.minGapS != null ? o.minGapS : LEVEL_MIN_GAP_S;
+    const margin = o.marginPct != null ? o.marginPct : LEVEL_MARGIN_PCT;
+    const st = { level: flat, suggested: null, base: null, manual: false, lastChangeS: -Infinity, reason: null };
+    const gradeLevel = (g) => clampLevel(R.trainer.levelForGrade(g) + offset);
+
+    function baseFor(s) {
+      if (s.targetW != null && isFinite(s.targetW)) {
+        st.base = R.trainer.levelForTarget({ targetW: s.targetW, cadenceRpm: s.cadenceRpm, ftp: s.ftp, wheelCircMm: s.wheelCircMm, powerScale: s.powerScale });
+        return 'intervalo';
+      }
+      const g = Number(s.gradePct);
+      if (isFinite(g)) {
+        const cand = gradeLevel(g);
+        if (st.base == null) st.base = cand;
+        else if (cand !== st.base) {
+          // solo si la pendiente pasa el umbral con margen: se evalúa con la pendiente acercada al nivel actual
+          const back = gradeLevel(g - Math.sign(cand - st.base) * margin);
+          if (back !== st.base) st.base = back;
+        }
+      } else if (st.base == null) st.base = flat;
+      return 'pendiente';
+    }
+
+    return {
+      state: st,
+      update(s) {
+        s = s || {};
+        let reason = baseFor(s);
+        let want = st.base;
+        if (s.hydrating) { want = Math.max(1, flat - 1); reason = 'hidratacion'; }
+        else if (s.attacking) { want = Math.min(LEVELS, st.base + 1); reason = 'ataque'; }
+        if (want === st.suggested) return null;
+        const t = Number(s.tS) || 0;
+        if (st.suggested != null && t - st.lastChangeS < minGapS) return null;
+        const prev = st.suggested == null ? null : st.level;
+        st.suggested = want; st.lastChangeS = t; st.reason = reason;
+        const already = prev === want; // el usuario ya la había puesto ahí a mano
+        st.level = want; st.manual = false;
+        return already ? null : { level: want, prev, reason };
+      },
+      manual(delta) {
+        st.level = clampLevel(st.level + (delta > 0 ? 1 : delta < 0 ? -1 : 0));
+        st.manual = st.suggested != null && st.level !== st.suggested;
+        return st.level;
+      },
+      get level() { return st.level; },
+      get suggested() { return st.suggested; },
+    };
+  }
+
+  // Pausas de hidratación en rodadas sin estructura: cada everyMin min, durante durationS s (el cronómetro sigue).
+  // update(tS) -> { active, remainingS, started, ended }
+  function createHydrationTimer(opts) {
+    const o = opts || {};
+    const every = (o.everyMin > 0 ? o.everyMin : 12) * 60;
+    const dur = o.durationS > 0 ? o.durationS : 45;
+    let active = false, endsAt = 0, next = every;
+    return {
+      update(tS) {
+        let started = false, ended = false;
+        if (active && tS >= endsAt) { active = false; ended = true; }
+        if (!active && tS >= next) { active = true; started = true; endsAt = next + dur; next += every; }
+        return { active, remainingS: active ? Math.max(0, endsAt - tS) : 0, started, ended, durationS: dur };
+      },
+    };
+  }
+
   R.rideLogic = {
+    smoothedGrade, virtualPower, readings, hrZone, HR_ZONES, HR_MAX_DEFAULT, createLevelAdvisor, createHydrationTimer, LEVELS,
     positionPill, computeViewInsets, createDoubleTap,
     fmtTime, fmtGap, fmtKm, ymd, ghostTimeAt, ghostGapS, ghostSpeed, createSampler, createEventDetector,
     windowAround, zoneSeconds, buildActivity, timedChoice, gradeArrow, pickTodayWorkout,
@@ -295,6 +458,7 @@
   const BIKE_KG = 8;
   const MOBILE_MQ = '(max-width: 700px), (max-height: 500px)';
   const LOOP_MSG = 'La ruta se repite si pasas la meta.';
+  const BT_NOTE = 'Para sensores usa la versión web en Chrome';
   let inst = null;
 
   function h(tag, attrs, kids) {
@@ -416,6 +580,8 @@
     const settings = state0.settings || {};
     const zones = zonePalette(ftp);
     const routes = R.routes.list();
+    // ciclistas del pelotón: 8..20 (14 por defecto), igual que store.js
+    function botsCountOf(v) { return R.store.normalizeBotsCount ? R.store.normalizeBotsCount(v) : clamp(Math.round(Number(v)) || 14, 8, 20); }
 
     // ---------- avisos y diálogos propios (por encima de la pantalla completa) ----------
     let toastEl = null;
@@ -467,7 +633,7 @@
       workoutId: params.workoutId || null,
       routeId: params.routeId || null,
       ghost: true,
-      bots: clamp(settings.botsCount != null ? settings.botsCount : 6, 0, 12),
+      bots: botsCountOf(settings.botsCount),
       camera: 'persecucion',
     };
     if (!params.workoutId && !params.routeId) {
@@ -640,6 +806,7 @@
         h('p', { class: 'rd-note', text: cfg.tab === 'workout' || isTimedMode()
           ? 'El simulador sigue solo la potencia objetivo de cada paso. Ajusta la intensidad con las flechas ↑ ↓ (±5 %) o con los botones − y +.'
           : 'Fija tu potencia con las flechas ↑ ↓ (±10 W), con los botones − y + o con el deslizador; la velocidad sale de la física según la pendiente.' }),
+        h('p', { class: 'rd-note', text: 'Con el sensor de velocidad conectado (Ajustes › Sensores y rodillo), la potencia se estima con la velocidad de tu rueda y el nivel de la palanca. La app te sugiere el nivel (1 a 8); si no lo sigues, márcalo con − y + junto al nivel. La app sugiere el nivel; si no moviste la palanca, corrígelo con − / +.' }),
       ]));
 
       // --- opciones
@@ -654,11 +821,12 @@
             h('small', { text: best ? 'Tu mejor tiempo: ' + L.fmtTime(best.totalTimeS) + (boost ? '; el fantasma va ' + String(boost).replace('.', ',') + ' % más rápido.' : '.') : 'Aún no tienes una marca en esta ruta: complétala una vez y aparecerá.' }),
           ]),
         ]));
-        opts.appendChild(h('label', { class: 'rd-lbl', for: 'rd-bots', text: 'Bots rivales (0 a 12)' }));
+        opts.appendChild(h('label', { class: 'rd-lbl', for: 'rd-bots', text: 'Ciclistas del pelotón (8 a 20)' }));
         opts.appendChild(h('input', {
-          id: 'rd-bots', class: 'rd-input', type: 'number', min: '0', max: '12', step: '1', value: String(cfg.bots),
-          oninput: (e) => { cfg.bots = clamp(Math.round(Number(e.target.value) || 0), 0, 12); },
+          id: 'rd-bots', class: 'rd-input', type: 'number', min: '8', max: '20', step: '1', value: String(cfg.bots),
+          onchange: (e) => { cfg.bots = botsCountOf(e.target.value); e.target.value = String(cfg.bots); },
         }));
+        opts.appendChild(h('p', { class: 'rd-note', text: 'Cada 6 a 12 minutos el pelotón ataca: síguelo subiendo un nivel la palanca.' }));
       }
       opts.appendChild(h('label', { class: 'rd-lbl', for: 'rd-cam', text: 'Cámara (también con la tecla C)' }));
       opts.appendChild(h('select', { id: 'rd-cam', class: 'rd-select', onchange: (e) => { cfg.camera = e.target.value; } },
@@ -741,8 +909,9 @@
         const tr = stage.top.getBoundingClientRect();
         const br = stage.charts.parentNode.getBoundingClientRect();
         const cr = stage.controls.getBoundingClientRect();
-        // la columna de controles va a la derecha: cuenta como margen derecho
-        ins = L.computeViewInsets({ scene: sc, top: { bottom: tr.bottom }, strip: { top: br.top }, controls: cr.width ? { left: cr.left } : null });
+        const lr = stage.lvl ? stage.lvl.getBoundingClientRect() : null;
+        // la columna de controles va a la derecha (margen derecho); la del nivel del rodillo, a la izquierda
+        ins = L.computeViewInsets({ scene: sc, top: { bottom: tr.bottom }, strip: { top: br.top }, controls: cr.width ? { left: cr.left } : null, level: lr && lr.width ? { right: lr.right } : null });
         vars = [Math.round(tr.bottom - sc.top) + 'px', Math.round(sc.bottom - br.top) + 'px'];
       }
       const vkey = vars ? vars.join('|') : '';
@@ -763,9 +932,17 @@
       const mode = currentMode();
       const route = R.routes.get(cfg.routeId);
       if (!route) { say('Elige una ruta para continuar.', 'warn'); return; }
-      const workout = isTimedMode() ? genTimed() : mode === 'workout' ? R.training.getWorkout(cfg.workoutId) : null;
+      let workout = isTimedMode() ? genTimed() : mode === 'workout' ? R.training.getWorkout(cfg.workoutId) : null;
       if (workout && workout.generated) R.training.registerWorkout(workout);
       if (mode === 'workout' && !workout) { say('No encontramos ese entrenamiento.', 'warn'); return; }
+      // ajustes vigentes (pueden haber cambiado en Ajustes desde que se abrió la vista)
+      const curSet = store.get().settings || {};
+      const trainerCfg = R.sensorsSettings ? R.sensorsSettings.normalizeTrainer(curSet.trainer) : { wheelCircMm: 2050, flatLevel: 3, powerScale: 1 };
+      const hyd = R.store.normalizeHydration ? R.store.normalizeHydration(curSet.hydration) : { enabled: false, everyMin: 12, durationS: 45 };
+      // hidratación: pausas dentro de los entrenamientos estructurados (no en tests de FTP)
+      if (workout && hyd.enabled && workout.category !== 'test' && R.training.withHydration) {
+        try { workout = R.training.withHydration(workout, { everyMin: hyd.everyMin, durationS: hyd.durationS }); } catch (e) { /* sin pausas */ }
+      }
 
       ride = {
         mode, route, workout, tS: 0, distM: 0, routeDist: 0, v: 0, kJ: 0, paused: false, over: false,
@@ -775,6 +952,13 @@
         lastStepIdx: -1,
         detector: null, msgUntil: 0, lastRank: [], camIdx: Math.max(0, L.CAMERAS.findIndex((c) => c.id === cfg.camera)),
         lastChart: 0, finishing: false, hidden: false,
+        // rodillo mecánico y sensores
+        trainer: trainerCfg, maxHr: (profile && profile.maxHr > 0) ? profile.maxHr : L.HR_MAX_DEFAULT,
+        advisor: L.createLevelAdvisor({ flatLevel: trainerCfg.flatLevel }), levelFlashUntil: 0,
+        dev: {}, devStatus: [], wheelKph: null, powerSource: 'sim', hrSource: null, unsubs: [],
+        // pelotón e hidratación
+        peloton: null, attack: null,
+        hydTimer: !workout && hyd.enabled ? L.createHydrationTimer(hyd) : null, hydr: { active: false, remainingS: 0 }, simBeforeHyd: null,
       };
       ride.detector = L.createEventDetector({ mode, totalDistM: mode === 'route' ? route.distanceM : 0 });
 
@@ -788,14 +972,22 @@
             ride.ghostLabel = 'Tu mejor marca' + (boost ? ' (+' + String(boost).replace('.', ',') + ' %)' : '');
           } catch (e) { say('No pudimos cargar tu mejor marca: ' + e.message, 'warn'); }
         }
-        if (cfg.bots > 0) {
-          try {
-            ride.bots = R.riders.createBots({ count: cfg.bots, ftp, massKg, route, seed: Math.floor(Date.now() / 60000) });
-          } catch (e) { say('No pudimos crear los bots: ' + e.message, 'warn'); }
-        }
+        try {
+          ride.peloton = R.riders.createPeloton({ count: botsCountOf(cfg.bots), ftp, massKg, route, seed: Math.floor(Date.now() / 60000), onAttack: onAttack });
+          ride.bots = ride.peloton.bots;
+        } catch (e) { say('No pudimos crear el pelotón: ' + e.message, 'warn'); }
       }
 
-      // única fuente de datos: el simulador
+      // sensores reales (R.devices): la última lectura y el estado de conexión
+      if (R.devices && R.devices.on) {
+        ride.devStatus = R.devices.status ? R.devices.status() : [];
+        const mine = ride;
+        ride.unsubs.push(R.devices.on('data', (d) => { mine.dev = d || {}; }));
+        ride.unsubs.push(R.devices.on('status', (list) => { mine.devStatus = list || []; }));
+        // el modo del CSC (velocidad/cadencia) se conoce con el primer paquete: llega como 'cscMode', no como 'status'
+        ride.unsubs.push(R.devices.on('cscMode', () => { mine.devStatus = R.devices.status ? R.devices.status() : mine.devStatus; }));
+      }
+      // simulador: respaldo sin sensores (y objetivo ERG de los entrenamientos)
       sim = R.devices.createSimulator({ ftp, maxHr: (profile && profile.maxHr) || undefined, massKg });
       sim.setTargetPower(workout ? R.training.targetPowerAt(workout, 0, ftp).watts : ride.simTarget);
       cleanups.push(sim.on('data', onData));
@@ -811,8 +1003,29 @@
 
       phase = 'countdown';
       buildStage();
+      noteBluetooth(); // después de buildStage(): este vacía root
       requestWake();
       runCountdown(3);
+    }
+
+    // Sin Web Bluetooth (p. ej. dentro de Claude): aviso breve, una vez por sesión.
+    function noteBluetooth() {
+      let has = false;
+      try { has = typeof navigator !== 'undefined' && !!navigator.bluetooth; } catch (e) { has = false; }
+      if (has) return;
+      try { if (window.sessionStorage.getItem('rodillator.hud.btnote') === '1') return; window.sessionStorage.setItem('rodillator.hud.btnote', '1'); } catch (e) { /* sin sessionStorage */ }
+      say(BT_NOTE, 'info');
+    }
+
+    // Callback del pelotón: evento del coach, banner y mensaje.
+    function onAttack(phase, info) {
+      if (!ride) return;
+      const gapS = info && info.gapS != null ? info.gapS : 0;
+      if (phase === 'start') ride.attack = { gapS };
+      else if (phase === 'end') ride.attack = null;
+      if (coach) coach.event('attack', { phase, gapS });
+      if (stage && phase === 'caught') showMessage('¡Bien! Sigues con el grupo.', 'good');
+      else if (stage && phase === 'dropped') showMessage('Se te escapó el grupo: ¡vamos!', 'bad');
     }
 
     function onData(d) {
@@ -836,6 +1049,9 @@
       const sceneEl = h('div', { class: 'rd-scene' });
       root.appendChild(sceneEl);
       root.classList.toggle('rd--wk', !!ride.workout);
+      root.classList.toggle('rd--ghost', !!ride.ghost);
+      root.classList.remove('has-hr', 'has-alert', 'has-alert-2'); root._hasAlert2 = false;
+      root._hasHr = false; root._hasAlert = false; root._sensor = false; root.classList.remove('is-sensor');
       root.classList.toggle('is-more', moreOpen);
       // doble toque sobre la vista 3D = cambiar de cámara
       const dtap = L.createDoubleTap(320, 36);
@@ -913,6 +1129,7 @@
       S.distOf = h('i', { class: 'rd-m-of', text: '' });
       S.mDist.el.querySelector('.rd-m-row').insertBefore(S.distOf, S.mDist.el.querySelector('small'));
       S.mTime = m('Tiempo', ''); S.mGrade = m('Pendiente', '%'); S.mKj = m('Trabajo', 'kJ');
+      S.mHr.el.classList.add('rd-m--hr'); S.mGrade.el.classList.add('rd-m--grade');
       S.arrow = h('span', { class: 'rd-arrow', text: '→' });
       S.mGrade.el.querySelector('.rd-m-row').insertBefore(S.arrow, S.mGrade.v);
       const metrics = h('div', { class: 'rd-metrics' }, [S.mTime.el, S.mDist.el, S.mSpd.el, S.mGrade.el, S.mCad.el, S.mHr.el, S.mKj.el]);
@@ -940,6 +1157,24 @@
       });
       const controls = h('div', { class: 'rd-controls' }, [S.pauseBtn, S.minusBtn, S.plusBtn, S.adj, S.camBtn, S.muteBtn, S.endBtn, S.slider]);
       S.controls = controls;
+      // nivel del rodillo mecánico: número + barra de 8 segmentos + −/+ (nivel real si no se siguió la sugerencia)
+      S.lvlN = h('b', { class: 'rd-lvl-n', text: String(ride.advisor.level) });
+      S.lvlBar = h('span', { class: 'rd-lvl-bar', 'aria-hidden': 'true' });
+      S.lvlSegs = [];
+      for (let i = 1; i <= L.LEVELS; i++) { const seg = h('i', { 'data-l': String(i) }); S.lvlBar.appendChild(seg); S.lvlSegs.push(seg); }
+      S.lvlHint = h('span', { class: 'rd-lvl-h', text: 'Sugerido' });
+      S.lvlMinus = h('button', { type: 'button', class: 'rd-lvl-b rd-lvl-b--minus', 'aria-label': 'Bajé la palanca un nivel', title: 'Bajé la palanca un nivel', onclick: () => manualLevel(-1) }, icon('minus'));
+      S.lvlPlus = h('button', { type: 'button', class: 'rd-lvl-b rd-lvl-b--plus', 'aria-label': 'Subí la palanca un nivel', title: 'Subí la palanca un nivel', onclick: () => manualLevel(1) }, icon('plus'));
+      S.lvl = h('section', { class: 'rd-panel rd-lvl', role: 'group', 'aria-label': 'Nivel del rodillo' }, [
+        h('span', { class: 'rd-lvl-l', text: 'Nivel' }),
+        h('span', { class: 'rd-lvl-v', role: 'status', 'aria-live': 'polite' }, [S.lvlN, h('small', { class: 'rd-lvl-of', text: '/8' })]),
+        S.lvlBar, S.lvlHint, S.lvlPlus, S.lvlMinus,
+      ]);
+      // avisos de ataque e hidratación (bajo la barra superior, sin tapar al ciclista)
+      const banner = (cls) => { const t = h('b'), sub = h('span'); return { el: h('div', { class: 'rd-alert ' + cls, role: 'status', hidden: true }, [t, sub]), t, sub }; };
+      S.atk = banner('rd-alert--attack');
+      S.hyd = banner('rd-alert--hydrate');
+      S.alerts = h('div', { class: 'rd-alerts', 'aria-live': 'polite' }, [S.hyd.el, S.atk.el]);
       S.paused = h('div', { class: 'rd-paused', hidden: true }, [h('b', { text: 'En pausa' }), h('span', { text: 'Espacio para seguir' })]);
       S.count = h('div', { class: 'rd-count', 'aria-live': 'assertive' });
       // píldora de posiciones (solo móvil) y botón "Más datos" (solo móvil)
@@ -947,14 +1182,14 @@
       S.moreBtn = h('button', { type: 'button', class: 'rd-more', 'aria-expanded': moreOpen ? 'true' : 'false', onclick: () => toggleMore() });
       S.top = h('div', { class: 'rd-top' }, [powerBox, ride.ghost ? S.gap : null, metrics]);
       root.appendChild(h('div', { class: 'rd-hud' }, [
-        S.top, S.pill, S.moreBtn, h('div', { class: 'rd-right' }, [S.board, controls]), S.msg, h('div', { class: 'rd-bottom' }, [charts]),
+        S.top, S.pill, S.moreBtn, h('div', { class: 'rd-right' }, [S.lvl, S.board, controls]), S.alerts, S.msg, h('div', { class: 'rd-bottom' }, [charts]),
       ]));
       S.charts = charts;
       setMoreLabel();
       if (typeof ResizeObserver !== 'undefined') {
         if (layoutRO) layoutRO.disconnect();
         layoutRO = new ResizeObserver(() => { if (stage && scene) syncLayout(false); });
-        [sceneEl, S.top, S.controls, S.charts.parentNode].forEach((el) => layoutRO.observe(el));
+        [sceneEl, S.top, S.controls, S.lvl, S.charts.parentNode].forEach((el) => layoutRO.observe(el));
       }
       root.appendChild(S.paused);
       root.appendChild(S.count);
@@ -1035,11 +1270,6 @@
 
     function advance(dt, nowMs) {
       const r = ride;
-      // datos del simulador
-      const d = r.latest || {};
-      r.power = Math.max(0, d.powerW || 0);
-      r.hr = d.hrBpm != null ? d.hrBpm : null;
-      r.cad = d.cadenceRpm != null ? d.cadenceRpm : null;
       r.tS += dt;
 
       // entrenamiento: ERG
@@ -1051,8 +1281,30 @@
         r.lastStepIdx = tp.stepIndex;
       }
 
-      // física
+      // hidratación: paso del entrenamiento o temporizador de la rodada libre
+      updateHydration(tp);
+
+      // nivel sugerido del rodillo (la app solo sugiere; el usuario mueve la palanca)
       const len = r.route.distanceM;
+      const lvl = r.advisor.update({
+        tS: r.tS,
+        gradePct: tp ? null : L.smoothedGrade(r.route, r.distM, 150, r.mode !== 'route'),
+        targetW: tp ? Math.round(tp.watts * r.intensity) : null,
+        cadenceRpm: tp && tp.step && tp.step.cadence > 0 ? tp.step.cadence : 90,
+        ftp, wheelCircMm: r.trainer.wheelCircMm, powerScale: r.trainer.powerScale,
+        attacking: !!(r.peloton && r.peloton.state.attacking), hydrating: r.hydr.active,
+      });
+      if (lvl) {
+        r.levelFlashUntil = nowMs + 2500;
+        if (coach) coach.event('resistance', lvl);
+      }
+
+      // datos: sensores reales si los hay (potencia virtual con el nivel actual), si no el simulador
+      const rd = L.readings({ sim: r.latest || {}, dev: r.dev, status: r.devStatus, level: r.advisor.level, powerScale: r.trainer.powerScale });
+      r.power = rd.powerW; r.hr = rd.hr; r.cad = rd.cad;
+      r.wheelKph = rd.wheelKph; r.powerSource = rd.powerSource; r.hrSource = rd.hrSource;
+
+      // física
       const s = R.routes.sampleAt(r.route, r.mode === 'route' ? Math.min(r.distM, len) : r.distM % len);
       r.grade = s.gradePct; r.ele = s.ele;
       const v0 = r.v;
@@ -1062,8 +1314,9 @@
       let reachedEnd = false;
       if (r.mode === 'route' && r.distM >= len) { r.distM = len; reachedEnd = true; }
 
-      // bots y fantasma
-      r.bots.forEach((b) => b.update(dt, r.tS));
+      // pelotón y fantasma
+      if (r.peloton) { r.peloton.update(dt, r.tS, r.distM); if (r.attack) r.attack.gapS = r.peloton.state.gapS; }
+      else r.bots.forEach((b) => b.update(dt, r.tS));
       r.ghostGap = r.ghost ? L.ghostGapS(r.ghost, r.distM, r.tS) : null;
 
       // muestreo 1 Hz
@@ -1085,6 +1338,33 @@
 
       if (reachedEnd) finishRide(true);
       else if (r.workout && r.tS >= r.workout.durationS) finishRide(true);
+    }
+
+    // Pausa de hidratación (no detiene el cronómetro: es pedaleo suave).
+    function updateHydration(tp) {
+      const r = ride;
+      const was = r.hydr.active;
+      let st;
+      if (tp) st = { active: !!(tp.step && tp.step.hydrate), remainingS: tp.stepRemainingS, durationS: tp.step ? tp.step.durationS : 0 };
+      else if (r.hydTimer) st = r.hydTimer.update(r.tS);
+      else return;
+      r.hydr = { active: st.active, remainingS: st.remainingS };
+      if (st.active && !was) {
+        if (coach) coach.event('hydrate', { durationS: Math.round(st.durationS) });
+        // rodada libre con el simulador: pedaleo suave durante la pausa
+        if (!tp && sim && r.powerSource === 'sim') { r.simBeforeHyd = sim.getTargetPower(); sim.setTargetPower(Math.round(0.5 * ftp)); }
+      } else if (!st.active && was) {
+        // solo si el objetivo sigue siendo el de la pausa (si el usuario lo cambió, se respeta)
+        if (r.simBeforeHyd != null && sim && sim.getTargetPower() === Math.round(0.5 * ftp)) sim.setTargetPower(r.simBeforeHyd);
+        r.simBeforeHyd = null;
+      }
+    }
+
+    // El usuario indica el nivel real de la palanca (si no siguió la sugerencia).
+    function manualLevel(sign) {
+      if (!ride || phase !== 'ride') return;
+      ride.advisor.manual(sign);
+      if (stage) updateLevel(performance.now());
     }
 
     function showMessage(text, tone) {
@@ -1121,6 +1401,8 @@
         const nx = r.workout.steps[tp.stepIndex + 1];
         setText(S.tNext, nx ? 'Sigue: ' + (nx.label || 'siguiente paso') + ' ' + Math.round(nx.powerPct * ftp / 100 * r.intensity) + ' W' : 'Último paso');
         setText(S.adj, Math.round(r.intensity * 100) + ' %');
+      } else if (r.powerSource === 'csc' || r.powerSource === 'device') {
+        setText(S.adj, 'Sensor'); // la potencia sale de la rueda: el objetivo del simulador no se usa
       } else if (sim) {
         const tw = sim.getTargetPower();
         setText(S.adj, tw + ' W');
@@ -1137,6 +1419,18 @@
       S.arrow.className = 'rd-arrow ' + (r.grade > 1 ? 'up' : r.grade < -1 ? 'down' : 'flat');
       setText(S.mCad.v, r.cad != null ? String(Math.round(r.cad)) : '–');
       setText(S.mHr.v, r.hr != null ? String(Math.round(r.hr)) : '–');
+      // FC de la banda con color por zona (% de la FC máxima del perfil, 186 por defecto)
+      const hz = r.hrSource === 'hr' ? L.hrZone(r.hr, r.maxHr) : null;
+      setStyle(S.mHr.v, 'color', hz ? hz.color : '');
+      if (S.mHr.el._z !== (hz ? hz.zone : 0)) {
+        S.mHr.el._z = hz ? hz.zone : 0;
+        S.mHr.el.title = hz ? 'Zona ' + hz.zone + ' de FC (' + hz.name + ')' : '';
+      }
+      const sensorPower = (r.powerSource === 'csc' || r.powerSource === 'device') && !r.workout;
+      if (root._sensor !== sensorPower) { root._sensor = sensorPower; root.classList.toggle('is-sensor', sensorPower); }
+      if (root._hasHr !== (r.hrSource === 'hr')) { root._hasHr = r.hrSource === 'hr'; root.classList.toggle('has-hr', root._hasHr); }
+      updateLevel(nowMs);
+      updateAlerts();
       setText(S.mKj.v, String(Math.round(r.kJ)));
 
       // brecha y tabla
@@ -1168,6 +1462,45 @@
       if (nowMs - r.lastChart > 120) { r.lastChart = nowMs; drawProfile(list); if (r.workout) drawWorkoutChart(); }
     }
     const MINUS_CH = L.fmtGap(-5)[0]; // U+2212
+
+    function updateLevel(nowMs) {
+      const r = ride, S = stage;
+      if (!r || !S || !S.lvl) return;
+      const lv = r.advisor.level, sug = r.advisor.suggested;
+      setText(S.lvlN, String(lv));
+      if (S.lvl._lv !== lv) {
+        S.lvl._lv = lv;
+        S.lvlSegs.forEach((seg, i) => seg.classList.toggle('is-on', i < lv));
+        S.lvl.setAttribute('data-level', String(lv));
+        S.lvlMinus.disabled = lv <= 1;
+        S.lvlPlus.disabled = lv >= L.LEVELS;
+      }
+      const manual = sug != null && lv !== sug;
+      setText(S.lvlHint, manual ? 'Sugerido ' + sug : 'Sugerido');
+      S.lvl.classList.toggle('is-manual', manual);
+      S.lvl.classList.toggle('is-new', nowMs < r.levelFlashUntil);
+    }
+
+    function updateAlerts() {
+      const r = ride, S = stage;
+      const atkOn = !!r.attack, hydOn = !!(r.hydr && r.hydr.active);
+      if (S.atk.el.hidden === atkOn) S.atk.el.hidden = !atkOn;
+      if (S.hyd.el.hidden === hydOn) S.hyd.el.hidden = !hydOn;
+      if (atkOn) {
+        setText(S.atk.t, '¡Ataque! Sigue al grupo');
+        const g = r.attack.gapS || 0;
+        // brecha con el grupo en s (+ = el grupo va delante)
+        setText(S.atk.sub, Math.abs(g) < 0.5 ? 'con el grupo' : g > 0 ? L.fmtGap(g) : Math.round(-g) + ' s por delante');
+      }
+      if (hydOn) {
+        setText(S.hyd.t, 'Hidrátate');
+        setText(S.hyd.sub, L.fmtTime(Math.ceil(r.hydr.remainingS)) + ' · pedaleo suave');
+      }
+      const any = atkOn || hydOn;
+      if (root._hasAlert !== any) { root._hasAlert = any; root.classList.toggle('has-alert', any); }
+      const two = atkOn && hydOn;
+      if (root._hasAlert2 !== two) { root._hasAlert2 = two; root.classList.toggle('has-alert-2', two); }
+    }
 
     function drawProfile(list) {
       const S = stage, f = fitCanvas(S.profCv), g = f.g, w = f.w, hh = f.h;
@@ -1293,7 +1626,7 @@
       if (hiddenIv) clearInterval(hiddenIv); hiddenIv = 0;
       if (sim) { try { sim.stop(); } catch (e) { /* nada */ } }
       releaseWake();
-      if (ride) ride.over = true;
+      if (ride) { ride.over = true; (ride.unsubs || []).splice(0).forEach((u) => { try { u(); } catch (e) { /* nada */ } }); }
     }
 
     function disposeCoach() { if (audio) { try { audio.dispose(); } catch (e) { /* nada */ } } audio = null; coach = null; }

@@ -325,6 +325,24 @@ button.day:hover { border-color: #55606f; background: var(--surface-2); }
 .set-grid { display: grid; gap: 16px; grid-template-columns: 1fr; }
 .set-grid > .card + .card { margin-top: 0; }
 
+/* tarjeta "Sensores y rodillo" (src/ui/sensors-card.js) */
+.sn-box > .card { height: 100%; }
+.sn-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "t b" "s b" "s r"; column-gap: 12px; row-gap: 4px; align-items: center; padding: 12px 0; border-top: 1px solid var(--line); }
+.sn-row:last-of-type { border-bottom: 1px solid var(--line); margin-bottom: 12px; }
+.sn-row > strong { grid-area: t; font-weight: 600; }
+.sn-row > .btn { grid-area: b; justify-self: end; }
+.sn-row > .btn + .btn { grid-area: r; }
+.sn-state { grid-area: s; color: var(--muted); font-size: 13.5px; }
+.sn-warn { color: var(--warn); background: rgba(250, 192, 94, .1); border: 1px solid rgba(250, 192, 94, .35); border-radius: var(--radius); padding: 8px 12px; font-size: 14px; }
+.sn-note { color: var(--muted); background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--radius); padding: 8px 12px; font-size: 14px; }
+.sn-box .card h3 { margin: 6px 0 10px; }
+.sn-box .card > label { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-bottom: 12px; font-weight: 600; font-size: 14px; }
+.sn-box .card > label > select, .sn-box .card > label > input[type="number"] { flex: 1 1 160px; max-width: 260px; font-weight: 400; }
+.sn-box .card > label > input[type="range"] { flex: 1 1 160px; accent-color: var(--accent); }
+.sn-custom[hidden] { display: none !important; }
+.sn-scale-val { font-family: var(--font-display); font-weight: 800; font-size: 22px; min-width: 3.4ch; font-variant-numeric: tabular-nums; }
+@media (max-width: 480px) { .sn-row { grid-template-columns: 1fr; grid-template-areas: "t" "s" "b" "r"; } .sn-row > .btn { justify-self: start; } }
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
 }

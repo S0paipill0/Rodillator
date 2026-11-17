@@ -9,8 +9,8 @@ const { spawnSync } = require('node:child_process');
 const ROOT = path.join(__dirname, '..');
 const THREE = 'https://cdn.jsdelivr.net/npm/three@0.149.0/build/three.min.js';
 const CHART = 'https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js';
-const ORDER = ['store', 'training', 'physics', 'trainer', 'routes', 'riders', 'vendor/gltfloader', 'cyclist', 'scene3d', 'devices', 'integrations', 'voicepack', 'coach',
-  'ui/shell', 'ui/onboarding', 'ui/plan', 'ui/routes', 'ui/settings', 'ui/ride', 'ui/stats', 'app'];
+const ORDER = ['sensors-settings', 'store', 'training', 'physics', 'trainer', 'routes', 'riders', 'vendor/gltfloader', 'cyclist', 'scene3d', 'devices', 'integrations', 'voicepack', 'coach',
+  'ui/shell', 'ui/onboarding', 'ui/plan', 'ui/routes', 'ui/sensors-card', 'ui/settings', 'ui/ride', 'ui/stats', 'app'];
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'rodillator-build-'));
 function build(extra) {
@@ -46,6 +46,16 @@ test('orden exacto de scripts (omitiendo archivos inexistentes)', () => {
   const expected = ORDER.filter((n) => fs.existsSync(path.join(ROOT, 'src', n + '.js')));
   assert.deepEqual(found, expected);
   assert.ok(found.indexOf('ui/shell') < found.indexOf('app'));
+});
+
+test('sensors-settings va antes de store (normaliza al cargar) y ui/sensors-card entre ui/shell y ui/settings', () => {
+  const at = (n) => html.indexOf('/* @file src/' + n + '.js */');
+  ['sensors-settings', 'store', 'devices', 'ui/shell', 'ui/sensors-card', 'ui/settings', 'ui/ride'].forEach((n) => assert.ok(at(n) > 0, n));
+  assert.ok(at('sensors-settings') < at('store'));
+  assert.ok(at('devices') < at('ui/sensors-card'));
+  assert.ok(at('ui/shell') < at('ui/sensors-card'));
+  assert.ok(at('ui/sensors-card') < at('ui/settings'));
+  assert.ok(at('trainer') < at('ui/ride'));
 });
 
 test('R_ROUTES se inicializa antes de los push y todo script es JS válido', () => {
