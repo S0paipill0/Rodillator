@@ -807,7 +807,7 @@
         h('p', { class: 'rd-note', text: cfg.tab === 'workout' || isTimedMode()
           ? 'El simulador sigue solo la potencia objetivo de cada paso. Ajusta la intensidad con las flechas ↑ ↓ (±5 %) o con los botones − y +.'
           : 'Fija tu potencia con las flechas ↑ ↓ (±10 W), con los botones − y + o con el deslizador; la velocidad sale de la física según la pendiente.' }),
-        h('p', { class: 'rd-note', text: 'Con el sensor de velocidad conectado (Ajustes › Sensores y rodillo), la potencia se estima con la velocidad de tu rueda y el nivel de la palanca. La app te sugiere el nivel (1 a 8); si no lo sigues, márcalo con − y + junto al nivel. La app sugiere el nivel; si no moviste la palanca, corrígelo con − / +.' }),
+        h('p', { class: 'rd-note', text: 'Con el sensor de velocidad conectado (Ajustes › Sensores y rodillo), la potencia se estima con la velocidad de tu rueda y el nivel de la palanca. La app te sugiere el nivel (1 a 8); si no moviste la palanca, corrígelo con − / +.' }),
       ]));
 
       // --- opciones
@@ -1293,7 +1293,7 @@
         targetW: tp ? Math.round(tp.watts * r.intensity) : null,
         cadenceRpm: tp && tp.step && tp.step.cadence > 0 ? tp.step.cadence : 90,
         ftp, wheelCircMm: r.trainer.wheelCircMm, powerScale: r.trainer.powerScale,
-        attacking: !!(r.peloton && r.peloton.state.attacking), hydrating: r.hydr.active,
+        attacking: !!(r.peloton && r.peloton.state.attacking), hydrating: r.hydr.active && !r.hydr.inPlace,
       });
       if (lvl) {
         r.levelFlashUntil = nowMs + 2500;
@@ -1346,10 +1346,10 @@
       const r = ride;
       const was = r.hydr.active;
       let st;
-      if (tp) st = { active: !!(tp.step && tp.step.hydrate), remainingS: tp.stepRemainingS, durationS: tp.step ? tp.step.durationS : 0 };
+      if (tp) st = { active: !!(tp.step && tp.step.hydrate), inPlace: !!(tp.step && tp.step.hydrateInPlace), remainingS: tp.stepRemainingS, durationS: tp.step ? tp.step.durationS : 0 };
       else if (r.hydTimer) st = r.hydTimer.update(r.tS);
       else return;
-      r.hydr = { active: st.active, remainingS: st.remainingS };
+      r.hydr = { active: st.active, inPlace: !!st.inPlace, remainingS: st.remainingS };
       if (st.active && !was) {
         if (coach) coach.event('hydrate', { durationS: Math.round(st.durationS) });
         // rodada libre con el simulador: pedaleo suave durante la pausa
@@ -1495,7 +1495,7 @@
       }
       if (hydOn) {
         setText(S.hyd.t, 'Hidrátate');
-        setText(S.hyd.sub, L.fmtTime(Math.ceil(r.hydr.remainingS)) + ' · pedaleo suave');
+        setText(S.hyd.sub, L.fmtTime(Math.ceil(r.hydr.remainingS)) + (r.hydr.inPlace ? ' · bebe sin bajar la potencia' : ' · pedaleo suave'));
       }
       const any = atkOn || hydOn;
       if (root._hasAlert !== any) { root._hasAlert = any; root.classList.toggle('has-alert', any); }

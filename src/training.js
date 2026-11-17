@@ -867,6 +867,8 @@
   // Pausas de hidratación
   // ======================================================================
   const HYD_INTENSE_PCT = 88;   // desde sweet spot hacia arriba un paso es "intenso" y no se corta
+  const HYD_NOCUT_PCT = 106;     // desde VO2máx hacia arriba no se avisa ni se cambia nada (ni siquiera en el sitio)
+  const HYD_INPLACE_MIN_S = 2 * 60; // paso estable mínimo para un aviso de beber sin bajar la potencia
   const HYD_MIN_START_S = 8 * 60; // no insertar en los primeros 8 min
   const HYD_MIN_END_S = 5 * 60;   // ni en los últimos 5 min (del entrenamiento original)
   const HYD_SHORT_SOFT_S = 180;  // recuperación "corta" de una serie on/off (< 3 min)
@@ -875,7 +877,8 @@
 
   // Devuelve una copia del entrenamiento con pausas { durationS, powerPct: 50, label: 'Hidratación', hydrate: true }
   // cada ~everyMin min de trabajo. Las pausas van entre pasos o dentro de un paso suave (que se parte en
-  // dos); nunca dentro de un paso intenso (>= 88 % FTP; incluye todo paso >= 106 % y los intensos < 3 min).
+  // dos); nunca dentro de un paso intenso (>= 88 % FTP). En bloques estables 88–106 % de >= 6 min se inserta un
+  // aviso de beber en el sitio (hydrate + hydrateInPlace, misma potencia, no suma tiempo). Bloques >= 106 % no se tocan.
   // Si el momento toca dentro de un bloque intenso continuo, la pausa va justo después del bloque.
   // Los tiempos se miden en el entrenamiento original (sin contar las pausas). Los tests se devuelven sin pausas.
   function withHydration(workout, opts) {
@@ -886,13 +889,13 @@
     const src = workout.steps.map((s) => Object.assign({}, s));
     // idempotente: si ya trae pausas de hidratación no se agregan otras
     if (src.some((s) => s.hydrate)) {
-      const n = src.filter((s) => s.hydrate).length;
+      const n = src.filter((s) => s.hydrate && !s.hydrateInPlace).length;
       return Object.assign({}, workout, { steps: src, hydration: workout.hydration || { everyMin: everyMin, durationS: pauseS, count: n } });
     }
     const T = sumDur(src);
     const pause = () => ({ durationS: pauseS, powerPct: 50, label: 'Hidratación', hydrate: true });
     const out = [];
-    let count = 0;
+    let count = 0, inPlace = 0;
     if (workout.category !== 'test') {
       let due = Math.max(everyS, HYD_MIN_START_S), pending = false, done = false, t = 0;
       const valid = (p) => p >= HYD_MIN_START_S && p <= T - HYD_MIN_END_S;
@@ -902,6 +905,38 @@
         t = b;
         if (done) { out.push(step); return; }
         const soft = stepIntensity(step) < HYD_INTENSE_PCT;
+        const prevStep = src[idx - 1];
+        if (!soft && !pending && due <= a && prevStep && stepIntensity(prevStep) < HYD_INTENSE_PCT && step.durationS >= HYD_SHORT_SOFT_S && valid(a)) {
+          insertAt(a); // toca justo al empezar un bloque largo: la pausa va antes, entre pasos
+        }
+        if (!soft && stepIntensity(step) < HYD_NOCUT_PCT && step.durationS >= HYD_INPLACE_MIN_S && (pending || due < b)) {
+          // bloque intenso estable (sweet spot / umbral): aviso de beber SIN bajar la potencia (mismo powerPct)
+          let cur = step, ca = a;
+          while (!done && (pending || due < b)) {
+            let p = Math.max(due, ca);
+            if (p > T - HYD_MIN_END_S) { done = true; break; }
+            if (p - ca < HYD_MIN_FRAGMENT_S) p = ca;
+            const rem = b - p;
+            if (rem < pauseS + HYD_MIN_FRAGMENT_S) break;
+            const p0 = cur.powerPct, p1 = cur.powerPctEnd != null ? cur.powerPctEnd : cur.powerPct;
+            const at = (x) => p0 + (p1 - p0) * ((x - ca) / cur.durationS);
+            if (p > ca) {
+              const head = Object.assign({}, cur, { durationS: Math.round(p - ca) });
+              if (cur.powerPctEnd != null) head.powerPctEnd = at(p);
+              out.push(head);
+            }
+            const hs = Object.assign({}, cur, { durationS: pauseS, powerPct: at(p), label: 'Hidratación', hydrate: true, hydrateInPlace: true });
+            if (cur.powerPctEnd != null) hs.powerPctEnd = at(p + pauseS); else delete hs.powerPctEnd;
+            out.push(hs);
+            const tail = Object.assign({}, cur, { durationS: Math.round(b - (p + pauseS)) });
+            if (cur.powerPctEnd != null) tail.powerPct = at(p + pauseS);
+            cur = tail; ca = p + pauseS;
+            due = p + everyS; pending = false; inPlace++;
+          }
+          if (cur.durationS > 0) out.push(cur);
+          if (!done && due < b) pending = true;
+          return;
+        }
         if (pending || due <= a) {
           const nxt = src[idx + 1];
           if (soft && step.durationS < HYD_SHORT_SOFT_S && nxt && stepIntensity(nxt) >= HYD_INTENSE_PCT && valid(b)) {
@@ -939,7 +974,7 @@
     const w = Object.assign({}, workout, { steps: out });
     w.durationS = sumDur(out);
     w.tss = r1(out.reduce((acc, s) => acc + stepTss(s), 0));
-    w.hydration = { everyMin: everyMin, durationS: pauseS, count: count };
+    w.hydration = { everyMin: everyMin, durationS: pauseS, count: count, inPlace: inPlace };
     return w;
   }
 

@@ -330,8 +330,7 @@
 .rd-alert { display: flex; align-items: baseline; gap: 12px; max-width: 100%; padding: 8px 18px; border-radius: 14px; background: rgba(13, 19, 25, .88); border: 2px solid var(--rd-behind); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); white-space: nowrap; overflow: hidden; }
 .rd-alert[hidden] { display: none; }
 .rd-alert b { font-family: var(--rd-num); font-weight: 800; font-size: 30px; line-height: 1.05; min-width: 0; flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; }
-.rd-alert span { flex: none; }
-.rd-alert span { font-size: 15px; font-weight: 600; font-variant-numeric: tabular-nums; overflow: hidden; text-overflow: ellipsis; }
+.rd-alert span { flex: none; font-size: 15px; font-weight: 600; font-variant-numeric: tabular-nums; overflow: hidden; text-overflow: ellipsis; }
 .rd-alert--attack b { color: var(--rd-behind); }
 .rd-alert--hydrate { border-color: #3FA7D6; }
 .rd-alert--hydrate b { color: #3FA7D6; }

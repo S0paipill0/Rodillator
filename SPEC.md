@@ -18,7 +18,7 @@ App web de entrenamiento de ciclismo en rodillo, entregada como **un solo archiv
    (function (R) { 'use strict'; /* ... */ R.training = { ... }; })(typeof window !== 'undefined' ? (window.R = window.R || {}) : (globalThis.R = globalThis.R || {}));
    ```
    Así cada módulo puro se puede probar en Node (`node tests/<x>.test.js`) cargándolo con `require`.
-4. **Pruebas**: Node 22, `node:test` + `node:assert`. Sin dependencias npm. Comando de suite completa: `node --test tests/`.
+4. **Pruebas**: Node 22, `node:test` + `node:assert`. Sin dependencias npm. Comando de suite completa: `node --test`.
 5. **Datos de rutas**: `data/routes/<id>.json` con el esquema RouteData (abajo). `build.py` los embebe en el HTML.
 6. **Estética**: tema oscuro deportivo; color de acento del usuario `#FF5A1F` (naranja Rodillator); fantasma de mejor marca `#FFD23F` (dorado); bots `#7FA7C9`. Tipografías: "Barlow Condensed" (titulares/números) e "Inter" (texto), vía Google Fonts.
 7. **Ciencia del entrenamiento** (valores exactos):
