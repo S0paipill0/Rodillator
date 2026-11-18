@@ -10665,10 +10665,27 @@ THREE.GLTFLoader = GLTFLoader;
       return mats[key];
     }
     // clon del modelo con los materiales de la variante del ciclista (comparte geometrias con la plantilla)
+    // Clon que reconecta las mallas con piel (piernas) a los huesos del propio clon (como SkeletonUtils.clone);
+    // Object3D.clone deja el SkinnedMesh ligado a los huesos de la plantilla, que no estan en la escena.
+    function cloneModel(src) {
+      var dst = src.clone(true), srcOf = new Map(), dstOf = new Map();
+      (function walk(a, b) {
+        srcOf.set(b, a); dstOf.set(a, b);
+        for (var i = 0; i < a.children.length; i++) walk(a.children[i], b.children[i]);
+      })(src, dst);
+      dst.traverse(function (o) {
+        if (!o.isSkinnedMesh) return;
+        var so = srcOf.get(o), sk = so.skeleton;
+        var bones = sk.bones.map(function (b) { return dstOf.get(b) || b; });
+        o.bind(new T.Skeleton(bones, sk.boneInverses), so.bindMatrix);
+        o.frustumCulled = false;            // la caja de la pose de reposo no sigue a la animacion
+      });
+      return dst;
+    }
     function buildModelObject(st) {
       var tpl = tplFor(st), CY = R.cyclist, team = st.team || CY.botTeam(-1, st.id);
       var beard = st.kind !== 'bot' || CY.botHasBeard(st.id);
-      var obj = tpl.root.clone(true), meshes = [];
+      var obj = cloneModel(tpl.root), meshes = [];
       obj.traverse(function (o) {
         if (!o.isMesh) return;
         var role = tpl.roles.get(o.material) || 'other';
