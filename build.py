@@ -14,11 +14,16 @@ SCRIPT_ORDER = [
     'ui/shell', 'ui/onboarding', 'ui/plan', 'ui/routes', 'ui/sensors-card', 'ui/settings', 'ui/ride', 'ui/stats', 'app',
 ]
 MAX_HTML_BYTES = 14 * 1024 * 1024
-# Modelo 3D del ciclista (privado: lleva el rostro del usuario; assets/private/ esta en .gitignore).
-# Solo se embebe en el HTML generado (dist/, no versionado).
+# Modelos 3D del ciclista v2 (sin rostro fotografico; versionados en assets/cyclist/):
+#   hibrida.glb = el usuario y su fantasma (su bicicleta); ruta.glb = los bots del peloton.
+# assets/private/ (modelos antiguos con rostro) sigue fuera de git y solo se usa como respaldo.
 CYCLIST_CANDIDATES = [
+    os.path.join(ROOT, 'assets', 'cyclist', 'hibrida.glb'),
     os.path.join(ROOT, 'assets', 'private', 'cyclist.opt.glb'),
     os.path.join(ROOT, 'assets', 'private', 'Bernardino_Ciclista.glb'),
+]
+CYCLIST_BOT_CANDIDATES = [
+    os.path.join(ROOT, 'assets', 'cyclist', 'ruta.glb'),
 ]
 THREE_URL = 'https://cdn.jsdelivr.net/npm/three@0.149.0/build/three.min.js'
 CHART_URL = 'https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js'
@@ -76,28 +81,43 @@ def collect_scripts():
     return '\n'.join(parts)
 
 
-def find_cyclist(explicit=None):
-    """Ruta del GLB a embeber: la indicada, o el optimizado, o el original; None si no hay."""
+def find_glb(explicit, candidates):
+    """Ruta del GLB a embeber: la indicada o el primer candidato existente; None si no hay."""
     if explicit is not None:
         return explicit if os.path.isfile(explicit) else None
-    for c in CYCLIST_CANDIDATES:
+    for c in candidates:
         if os.path.isfile(c):
             return c
     return None
 
 
-def collect_cyclist(explicit=None):
-    path = find_cyclist(explicit)
-    if not path:
-        print('AVISO: no se encontró el modelo del ciclista (assets/private/cyclist.opt.glb); se usan ciclistas procedurales.')
-        return ''
+def find_cyclist(explicit=None):
+    return find_glb(explicit, CYCLIST_CANDIDATES)
+
+
+def embed_glb(path, var, label):
     with open(path, 'rb') as f:
         data = f.read()
     if data[:4] != b'glTF':
         print('AVISO: %s no es un GLB válido; se omite.' % os.path.basename(path))
         return ''
-    print('Modelo del ciclista: %s (%.0f KB)' % (os.path.basename(path), len(data) / 1024))
-    return '<script>window.R_CYCLIST_GLB="%s"</script>\n' % base64.b64encode(data).decode('ascii')
+    print('%s: %s (%.0f KB)' % (label, os.path.basename(path), len(data) / 1024))
+    return '<script>window.%s="%s"</script>\n' % (var, base64.b64encode(data).decode('ascii'))
+
+
+def collect_cyclist(explicit=None, explicit_bot=None):
+    path = find_cyclist(explicit)
+    if not path:
+        print('AVISO: no se encontró el modelo del ciclista (assets/cyclist/hibrida.glb); se usan ciclistas procedurales.')
+        return ''
+    out = embed_glb(path, 'R_CYCLIST_GLB', 'Modelo del ciclista')
+    if not out:
+        return ''
+    # modelo de los bots: el indicado, el de ruta por defecto (solo si el del usuario es el por defecto) o ninguno (usan el del usuario)
+    bot = find_glb(explicit_bot, CYCLIST_BOT_CANDIDATES if explicit is None else [])
+    if bot:
+        out += embed_glb(bot, 'R_CYCLIST_BOT_GLB', 'Modelo de los bots')
+    return out
 
 
 FORBIDDEN = [
@@ -124,14 +144,15 @@ def validate(html):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--out', default=os.path.join(ROOT, 'dist', 'rodillator.html'))
-    ap.add_argument('--cyclist', help='GLB del ciclista a embeber (por defecto assets/private/cyclist.opt.glb o el original); si no existe, no se embebe nada')
+    ap.add_argument('--cyclist', help='GLB del ciclista a embeber (por defecto assets/cyclist/hibrida.glb); si no existe, no se embebe nada')
+    ap.add_argument('--cyclist-bot', help='GLB de los bots (por defecto assets/cyclist/ruta.glb); sin él, los bots usan el modelo del ciclista')
     ap.add_argument('--local-libs', help='Solo para pruebas: carpeta con three.min.js y chart.umd.min.js (reemplaza las URLs CDN por file://)')
     args = ap.parse_args()
 
     html = read(os.path.join(ROOT, 'src', 'index.template.html'))
     html = html.replace('<!-- @STYLES -->', collect_css())
     html = html.replace('<!-- @ROUTES -->', collect_routes())
-    html = html.replace('<!-- @SCRIPTS -->', collect_cyclist(args.cyclist) + collect_voice() + collect_scripts())
+    html = html.replace('<!-- @SCRIPTS -->', collect_cyclist(args.cyclist, args.cyclist_bot) + collect_voice() + collect_scripts())
 
     problems = validate(html)
     if problems:

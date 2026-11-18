@@ -114,6 +114,15 @@ test('modelo del ciclista: con GLB lo embebe en base64 antes de los módulos', (
   assert.ok(h.indexOf('window.R_CYCLIST_GLB="') < h.indexOf('/* @file src/store.js */'));
   assert.ok(h.indexOf('window.R_CYCLIST_GLB="') > h.indexOf('window.R_ROUTES=[]'));
   assert.match(out, /Modelo del ciclista: fake\.glb/);
+  assert.ok(!h.includes('window.R_CYCLIST_BOT_GLB="'), 'con --cyclist explícito no se agrega el de ruta por defecto');
+});
+
+test('modelos v2: el build por defecto embebe la híbrida (usuario) y la de ruta (bots)', () => {
+  if (!fs.existsSync(path.join(ROOT, 'assets', 'cyclist', 'hibrida.glb'))) return;
+  const { html: h, stdout: out } = build([]);
+  assert.ok(h.includes('window.R_CYCLIST_GLB="Z2xURg'));
+  assert.ok(h.includes('window.R_CYCLIST_BOT_GLB="Z2xURg'));
+  assert.match(out, /Modelo de los bots: ruta\.glb/);
 });
 
 test('modelo del ciclista: un archivo que no es GLB no se embebe', () => {
@@ -140,9 +149,9 @@ test('privacidad: ningún GLB ni asset privado está versionado', () => {
   const r = spawnSync('git', ['ls-files'], { cwd: ROOT, encoding: 'utf8' });
   if (r.status !== 0) return;                        // fuera de un repositorio git
   const files = r.stdout.split('\n').filter(Boolean);
-  assert.deepEqual(files.filter((f) => /\.glb$/i.test(f)), []);
+  // solo los modelos v2 sin rostro (assets/cyclist/) se versionan; nunca assets/private/
+  assert.deepEqual(files.filter((f) => /\.(glb|gltf)$|cyclist\.opt/i.test(f) && !/^assets\/cyclist\/[\w-]+\.glb$/.test(f)), []);
   assert.deepEqual(files.filter((f) => /^assets\/private\//.test(f)), []);
-  assert.deepEqual(files.filter((f) => /\.(glb|gltf)$|cyclist\.opt/i.test(f)), []);
   const ig = fs.readFileSync(path.join(ROOT, '.gitignore'), 'utf8');
   assert.match(ig, /^assets\/private\/$/m);
 });

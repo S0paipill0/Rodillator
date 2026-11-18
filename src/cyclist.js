@@ -143,13 +143,28 @@
     return BOT_TEAMS[k % BOT_TEAMS.length];
   }
 
+  /** Con barba? Determinista por id: aproximadamente la mitad de los bots. */
+  function botHasBeard(id) { return (hashId(id) >>> 3) % 2 === 0; }
+
+  /** Rueda de un nodo pivote ya preparado en el modelo (v2: "Rueda_Delantera" / "Rueda_Trasera"): 'front' | 'rear' | null. */
+  function wheelPivotSide(name) {
+    var n = stripAccents(name).toLowerCase().replace(/[_\s]+/g, ' ').trim();
+    if (n === 'rueda delantera') return 'front';
+    if (n === 'rueda trasera') return 'rear';
+    return null;
+  }
+
   /** Papel de un material del modelo segun su nombre (y si lleva textura de rostro). */
   function materialRole(name, hasMap) {
     var n = stripAccents(name).toLowerCase();
     if (hasMap || /rostro/.test(n)) return 'face';
     if (/lente/.test(n)) return 'lenses';
     if (/maillot/.test(n)) return 'jersey';
+    if (/manga/.test(n)) return 'sleeves';
+    if (/espuma/.test(n)) return 'other';
+    if (/casco/.test(n)) return 'helmet';
     if (/cuadro/.test(n)) return 'frame';
+    if (/barba/.test(n)) return 'beard';
     if (/cabello|pelo/.test(n)) return 'hair';
     if (/piel/.test(n)) return 'skin';
     return 'other';
@@ -179,6 +194,8 @@
     wrapAngle: wrapAngle,
     botTeam: botTeam,
     materialRole: materialRole,
+    botHasBeard: botHasBeard,
+    wheelPivotSide: wheelPivotSide,
     hashId: hashId
   };
 })(typeof window !== 'undefined' ? (window.R = window.R || {}) : (globalThis.R = globalThis.R || {}));
