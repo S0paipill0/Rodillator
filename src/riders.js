@@ -97,7 +97,8 @@
   const PEL_ELASTIC_GAIN = 0.04;  // s⁻¹: m/s de ajuste de velocidad por metro de error de posición
   const PEL_ELASTIC_LIM_FRAC = 0.3, PEL_ELASTIC_LIM_ABS = 1.5; // tope del ajuste: ±(0,3·v_usuario + 1,5) m/s
   const PEL_MIN_SPACING_M = 2;    // separación mínima en la colocación inicial
-  const PEL_MAX_ACCEL = 1.5;      // m/s² máximo de cambio de velocidad de un bot (sin saltos visibles)
+  const PEL_MAX_ACCEL = 1.2;      // m/s² máximo de cambio de velocidad de un bot (sin saltos visibles)
+  const PEL_CMD_TAU_S = 1.4;      // s: filtro de la velocidad comandada (limita el tirón; aceleraciones progresivas)
   const PEL_MIN_ATTACK_START_S = 240;  // sin ataques en los primeros 4 min
   const PEL_NO_ATTACK_LAST_M = 2000;   // ni en los últimos 2 km de la ruta
   const PEL_CAUGHT_S = 5, PEL_DROPPED_S = 10;
@@ -136,7 +137,7 @@
       const off = group === 'principal' ? uni(-35, 35) : group === 'escapada' ? uni(80, 220) : -uni(60, 180);
       cfg.set(o.b.id, {
         off, boost: group === 'escapada' ? uni(0.02, 0.05) : 0,
-        wobA: uni(4, 10), wobP: uni(25, 60), wobPh: uni(0, 6.283), jitter: uni(-0.03, 0.03),
+        wobA: uni(3, 7), wobP: uni(40, 90), wobPh: uni(0, 6.283), jitter: uni(-0.03, 0.03),
       });
     });
     const mainBots = bots.filter((b) => b.group === 'principal');
@@ -209,7 +210,11 @@
           const lim = PEL_ELASTIC_LIM_FRAC * userSpeed + PEL_ELASTIC_LIM_ABS;
           vCmd = Math.max(0, userSpeed * (1 + c.boost) + Math.min(lim, Math.max(-lim, PEL_ELASTIC_GAIN * (target - prevD))));
         }
-        const v = Math.max(0, prevV + Math.min(PEL_MAX_ACCEL * dt, Math.max(-PEL_MAX_ACCEL * dt, vCmd - prevV)));
+        // comando filtrado (primer orden): los cambios de ritmo arrancan y terminan de forma progresiva
+        if (bot._vCmdF == null || first) bot._vCmdF = prevV;
+        if (attacker) bot._vCmdF = vCmd; // la física ya es progresiva
+        else bot._vCmdF += (vCmd - bot._vCmdF) * (1 - Math.exp(-dt / PEL_CMD_TAU_S));
+        const v = Math.max(0, prevV + Math.min(PEL_MAX_ACCEL * dt, Math.max(-PEL_MAX_ACCEL * dt, bot._vCmdF - prevV)));
         bot.distM = Math.min(end, Math.max(0, prevD + ((prevV + v) / 2) * dt));
         bot.speedMps = v;
       });

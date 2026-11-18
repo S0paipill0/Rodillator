@@ -258,6 +258,89 @@
     return (index - (count - 1) / 2) * spacing;
   }
 
+  /* ---- carriles con dinamica lateral (movimiento natural del peloton) ---- */
+  // Cada ciclista tiene un carril "preferido" estable; se aparta de quien tiene delante o al lado
+  // con un resorte-amortiguador critico (sin saltos), velocidad y aceleracion lateral acotadas.
+  var LANE = {
+    width: 0.85,      // m: separacion lateral que se considera "ocupada"
+    ahead: 3.5,       // m: ventana hacia delante (se alarga con la velocidad de cierre)
+    aheadMax: 9,      // m
+    behind: 1.4,      // m: ventana hacia atras (rueda con rueda)
+    push: 3.5,        // ganancia: m de desplazamiento deseado por m de separacion que falta
+    omega: 1.5,       // rad/s del resorte lateral (asentamiento ~3 s)
+    maxV: 0.9,        // m/s lateral maximo
+    maxA: 1.1,        // m/s2 lateral maximo
+    drift: 0.22,      // m de deriva lenta alrededor del carril preferido
+    userLat: 0, ghostLat: -1.0
+  };
+  function idHash(id) {
+    var h = 2166136261, s = String(id);
+    for (var i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); }
+    return (h >>> 0) / 4294967296;
+  }
+  /** Carril preferido (m, + = derecha) segun tipo e id: determinista. */
+  function laneHome(id, kind) {
+    if (kind === 'user') return LANE.userLat;
+    if (kind === 'ghost') return LANE.ghostLat;
+    return (idHash(id) * 2 - 1) * (LANE_HALF - 0.4);
+  }
+  function smooth01x(t) { t = t < 0 ? 0 : t > 1 ? 1 : t; return t * t * (3 - 2 * t); }
+  /**
+   * Avanza un paso la posicion lateral de cada ciclista. riders: [{ id, kind, distM, speed, lat, latV, latA, home }].
+   * El usuario queda fijo en su carril; el fantasma no es obstaculo. tS = tiempo de simulacion (deriva lenta).
+   */
+  function laneStep(riders, dt, tS) {
+    if (!(dt > 0)) return riders;
+    var n = riders.length, i, j, a, b;
+    var want = new Array(n);
+    for (i = 0; i < n; i++) {
+      a = riders[i];
+      if (a.home == null) a.home = laneHome(a.id, a.kind);
+      if (a.lat == null) { a.lat = a.home; a.latV = 0; a.latA = 0; }
+    }
+    for (i = 0; i < n; i++) {
+      a = riders[i];
+      if (a.kind !== 'bot') { want[i] = a.home; continue; }
+      var ph = idHash(a.id + '~') * 6.283, per = 45 + idHash(a.id + '#') * 55;
+      var w = a.home + LANE.drift * Math.sin(6.283 * (tS || 0) / per + ph);
+      for (j = 0; j < n; j++) {
+        if (j === i) continue;
+        b = riders[j];
+        if (b.kind === 'ghost') continue;
+        var dl = b.distM - a.distM;                            // > 0: b va delante
+        var close = Math.max(0, (a.speed || 0) - (b.speed || 0));
+        var ahead = Math.min(LANE.aheadMax, LANE.ahead + 2.5 * close);
+        if (dl > ahead || dl < -LANE.behind) continue;
+        var lw = dl >= 0 ? 1 - smooth01x(dl / ahead) * 0.7 : 1 - smooth01x(-dl / LANE.behind);
+        var dx = a.lat - b.lat, ad = Math.abs(dx);
+        var reach = LANE.width * 1.45;
+        if (ad >= reach) continue;
+        var side = ad > 1e-3 ? (dx > 0 ? 1 : -1) : (idHash(a.id + b.id) < 0.5 ? -1 : 1);
+        // si el lado elegido no tiene espacio, preferir el otro
+        if (side > 0 && b.lat + LANE.width > LANE_HALF) side = -1;
+        else if (side < 0 && b.lat - LANE.width < -LANE_HALF) side = 1;
+        // quien viene detras cede; el de delante casi no se mueve
+        var who = dl >= 0 ? 1 : 0.35;
+        w += side * LANE.push * (reach - ad) * lw * who;
+      }
+      want[i] = clamp(w, -LANE_HALF, LANE_HALF);
+    }
+    var steps = Math.max(1, Math.ceil(dt / 0.02)), h = dt / steps, k;
+    for (i = 0; i < n; i++) {
+      a = riders[i];
+      if (a.kind === 'user') { a.lat = a.home; a.latV = 0; a.latA = 0; continue; }
+      var om = LANE.omega, acc = 0;
+      for (k = 0; k < steps; k++) {
+        acc = om * om * (want[i] - a.lat) - 2 * om * a.latV;
+        acc = clamp(acc, -LANE.maxA, LANE.maxA);
+        a.latV = clamp(a.latV + acc * h, -LANE.maxV, LANE.maxV);
+        a.lat = clamp(a.lat + a.latV * h, -LANE_HALF, LANE_HALF);
+      }
+      a.latA += (acc - a.latA) * (1 - Math.exp(-dt / 0.25)); // aceleracion filtrada para la inclinacion
+    }
+    return riders;
+  }
+
   function srgbToLinear(c) { return Math.pow(c, 2.2); }
 
   var ELE_STOPS = (function () {
@@ -2709,6 +2792,29 @@
       delete riderById[st.id];
     }
 
+    var _qYaw = new T.Quaternion(), _qRoll = new T.Quaternion(), _xAxis = new T.Vector3(1, 0, 0);
+    /** Pose objetivo desde la distancia visual (vd) y el carril (lat): rumbo hacia donde se desplaza e inclinacion. */
+    function poseRider(A) {
+      var d = A.vd != null ? A.vd : A.distM, off = A.lat != null ? A.lat : 0;
+      pathPose(path, d, _pose);
+      A.tx = _pose.x - _pose.hz * off; A.tz = _pose.z + _pose.hx * off; A.ty = _pose.y;
+      A.hx = _pose.hx; A.hz = _pose.hz;
+      // base: x = tangente, z = derecha (tangente x arriba), y = z x x
+      _bx.set(_pose.tx, _pose.ty, _pose.tz);
+      _bz.crossVectors(_bx, _yAxis).normalize();
+      _by.crossVectors(_bz, _bx);
+      _m4.makeBasis(_bx, _by, _bz);
+      A.tq.setFromRotationMatrix(_m4);
+      if (A.kind !== 'user') {
+        var v = Math.max(2, A.speed || 0);
+        var yaw = -Math.atan2(A.latV || 0, v);                      // la bici apunta hacia donde se mueve
+        var roll = clamp(Math.atan((A.latA || 0) * 1.6 / 9.81), -0.14, 0.14); // se inclina hacia el giro
+        _qYaw.setFromAxisAngle(_yAxis, yaw);
+        _qRoll.setFromAxisAngle(_xAxis, roll);
+        A.tq.multiply(_qYaw).multiply(_qRoll);
+      }
+    }
+
     function setRiders(list) {
       if (disposed) return;
       var token = ++seenToken, i, j, st, r;
@@ -2735,25 +2841,10 @@
       for (i = riderList.length - 1; i >= 0; i--) {
         if (riderList[i].token !== token) { removeRider(riderList[i]); riderList.splice(i, 1); }
       }
-      // objetivos de pose, con reparto en el carril para quienes comparten distM
+      // velocidad estimada; la pose (carril lateral incluido) se calcula en render()
       var n = riderList.length, A;
       for (i = 0; i < n; i++) {
         A = riderList[i];
-        var idx = 0, cnt = 1;
-        for (j = 0; j < n; j++) {
-          if (j === i) continue;
-          if (Math.abs(riderList[j].distM - A.distM) < CLUSTER_M) { cnt++; if (j < i) idx++; }
-        }
-        pathPose(path, A.distM, _pose);
-        var off = laneOffset(idx, cnt);
-        A.tx = _pose.x - _pose.hz * off; A.tz = _pose.z + _pose.hx * off; A.ty = _pose.y;
-        A.hx = _pose.hx; A.hz = _pose.hz;
-        // base: x = tangente, z = derecha (tangente x arriba), y = z x x
-        _bx.set(_pose.tx, _pose.ty, _pose.tz);
-        _bz.crossVectors(_bx, _yAxis).normalize();
-        _by.crossVectors(_bz, _bx);
-        _m4.makeBasis(_bx, _by, _bz);
-        A.tq.setFromRotationMatrix(_m4);
         // velocidad estimada para animar pedaleo y ruedas
         var el = simTime - A.lastT;
         if (el > 1e-4) {
@@ -2762,6 +2853,7 @@
           A.lastD = A.distM; A.lastT = simTime;
         }
         if (A.fresh) {
+          A.vd = A.distM; poseRider(A);
           A.root.position.set(A.tx, A.ty, A.tz); A.root.quaternion.copy(A.tq); A.fresh = false;
         }
       }
@@ -2996,6 +3088,7 @@
 
       var kr = 1 - Math.exp(-dt * 18), i, st;
       if (R.cyclist) rankRiders();
+      laneStep(riderList, dt, simTime);
       var cx = camera.position.x, cy = camera.position.y, cz = camera.position.z;
       // etiquetas: usuario + fantasma + los LABEL_NEAR_BOTS bots mas cercanos a la camara (evita el amontonamiento con pelotones de 20)
       var portrait = compactView(), uSt = userState(), lvIn = _lvIn, lv;
@@ -3010,12 +3103,21 @@
       for (i = 0; i < riderList.length; i++) {
         st = riderList[i];
         var p = st.root.position;
+        // distancia visual: sigue a distM sin tirones (salto grande, p. ej. vuelta en modo libre: directo)
+        if (st.vd == null || Math.abs(st.distM - st.vd) > 30) { st.vd = st.distM; st.vdV = st.speed; }
+        else if (st.kind === 'user') st.vd = st.distM;
+        else {
+          var e = st.distM - st.vd, w0 = 7;
+          st.vdV = (st.vdV || 0) + (w0 * w0 * e - 2 * w0 * ((st.vdV || 0) - st.speed)) * dt;
+          st.vd += st.vdV * dt;
+        }
+        poseRider(st);
         var ddx = st.tx - p.x, ddy = st.ty - p.y, ddz = st.tz - p.z;
         if (ddx * ddx + ddy * ddy + ddz * ddz > 900) {              // salto grande: sin suavizado
           p.set(st.tx, st.ty, st.tz); st.root.quaternion.copy(st.tq);
         } else {
-          p.x += ddx * kr; p.y += ddy * kr; p.z += ddz * kr;
-          st.root.quaternion.slerp(st.tq, kr);
+          p.set(st.tx, st.ty, st.tz);
+          st.root.quaternion.slerp(st.tq, 1 - Math.exp(-dt * 10));
         }
         if (R.cyclist) updateRiderModel(st, dt);
         if (st.speed > 0.05 && st.lod === 'proc') {
@@ -3113,6 +3215,9 @@
       originOf: originOf,
       sampleRoute: sampleRoute,
       laneOffset: laneOffset,
+      laneStep: laneStep,
+      laneHome: laneHome,
+      LANE: LANE,
       elevationColor: elevationColor,
       makeHeightGrid: makeHeightGrid,
       gridHeight: gridHeight,

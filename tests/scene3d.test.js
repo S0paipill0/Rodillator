@@ -492,3 +492,42 @@ test('camara Cerca con 28 % reservado: rueda trasera dentro de la zona libre en 
   const headNdc = I.ndcY(cam, look, { x: 0, y: 1.75, z: 0 }, fov);
   assert.ok(free / 2 - headNdc * viewH / 2 > 0, 'cabeza dentro');
 });
+
+// ---- carriles con dinámica lateral (fluidez del pelotón) ----
+test('laneStep: el usuario queda fijo y los bots no saltan de carril (velocidad lateral acotada)', () => {
+  const L = I.LANE, dt = 1 / 60;
+  const rs = [{ id: 'user', kind: 'user', distM: 100, speed: 8 }];
+  for (let k = 0; k < 14; k++) rs.push({ id: 'bot-' + (k + 1), kind: 'bot', distM: 90 + k * 1.3, speed: 8 + (k % 3) * 0.4 });
+  let prev = null, maxStep = 0;
+  for (let f = 0; f < 60 * 60; f++) {
+    rs.forEach((r) => { r.distM += r.speed * dt; });
+    I.laneStep(rs, dt, f * dt);
+    if (prev) rs.forEach((r, i) => { maxStep = Math.max(maxStep, Math.abs(r.lat - prev[i])); });
+    prev = rs.map((r) => r.lat);
+    rs.forEach((r) => assert.ok(Math.abs(r.lat) <= 2.4 + 1e-9, 'fuera del camino ' + r.lat));
+    assert.strictEqual(rs[0].lat, L.userLat);
+  }
+  assert.ok(maxStep <= L.maxV * dt + 1e-9, 'salto lateral ' + maxStep);
+});
+
+test('laneStep: un bot que alcanza a otro en su carril se abre con anticipación y lo adelanta al lado', () => {
+  const dt = 1 / 60;
+  const slow = { id: 'bot-a', kind: 'bot', distM: 30, speed: 8, home: 0.3 };
+  const fast = { id: 'bot-b', kind: 'bot', distM: 0, speed: 9.5, home: 0.3 };
+  const user = { id: 'user', kind: 'user', distM: -200, speed: 8 };
+  const rs = [user, slow, fast];
+  let minSep = Infinity;
+  for (let f = 0; f < 60 * 60; f++) {
+    rs.forEach((r) => { r.distM += r.speed * dt; });
+    I.laneStep(rs, dt, 0);
+    if (Math.abs(fast.distM - slow.distM) < 1.5) minSep = Math.min(minSep, Math.abs(fast.lat - slow.lat));
+  }
+  assert.ok(minSep >= 0.6, 'separación al adelantar ' + minSep);
+  assert.ok(Math.abs(fast.lat - fast.home) < 0.3, 'vuelve a su carril: ' + fast.lat);
+});
+
+test('laneHome: determinista y dentro del camino; fantasma al costado del usuario', () => {
+  assert.strictEqual(I.laneHome('bot-3', 'bot'), I.laneHome('bot-3', 'bot'));
+  for (let k = 1; k <= 20; k++) assert.ok(Math.abs(I.laneHome('bot-' + k, 'bot')) <= 2.0);
+  assert.ok(Math.abs(I.laneHome('ghost', 'ghost') - I.laneHome('user', 'user')) >= 0.8);
+});
